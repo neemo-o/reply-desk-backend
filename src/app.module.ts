@@ -38,7 +38,11 @@ import { HealthModule } from './modules/health/health.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration], validate }),
-    ThrottlerModule.forRoot([{ name: 'global', ttl: 60_000, limit: 100 }]),
+    
+    ThrottlerModule.forRoot([
+      { name: 'default', ttl: 60_000, limit: 40 },
+      { name: 'global', ttl: 60_000, limit: 100 },
+    ]),
     ScheduleModule.forRoot(),
     LoggerModule,
     PrismaModule,
