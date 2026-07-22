@@ -1,0 +1,509 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  name          String
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  avatar        String?
+  emailVerified Boolean   @default(false) @map("email_verified")
+  lastLogin     DateTime? @map("last_login")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  tenantUsers           TenantUser[]
+  refreshTokens         RefreshToken[]
+  assignedConversations Conversation[]     @relation("AssignedUser")
+  conversationNotes     ConversationNote[]
+  auditLogs             AuditLog[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  tokenHash String   @map("token_hash")
+  revoked   Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt]) // DB-7: cron cleanup ORDER BY expires_at
+  @@index([userId, revoked, expiresAt]) // DB-7: query ativa do user
+  @@map("refresh_tokens")
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  logo      String?
+  timezone  String   @default("America/Sao_Paulo")
+  language  String   @default("pt-BR")
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenantUsers    TenantUser[]
+  roles          Role[]
+  subscriptions  Subscription[]
+  sessions       WhatsappSession[]
+  bots           Bot[]
+  contacts       Contact[]
+  conversations  Conversation[]
+  files          FileAsset[]
+  webhooks       Webhook[]
+  apiKeys        ApiKey[]
+  jobs           Job[]
+  auditLogs      AuditLog[]
+  dailyMetrics   DailyMetric[]
+  knowledgeBases KnowledgeBase[]
+
+  @@map("tenants")
+}
+
+model TenantUser {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  userId   String @map("user_id")
+  roleId   String @map("role_id")
+  status   String @default("active")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Restrict) // DB-11: Restrict evita roles sem tenant
+
+  @@unique([tenantId, userId])
+  @@index([tenantId]) // DB-1: listagem de membros
+  @@index([userId]) // DB-1: tenants do usuário
+  @@index([roleId]) // DB-1: lookup por role
+  @@map("tenant_users")
+}
+
+model Role {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  name        String
+  description String?
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantUsers     TenantUser[]
+  rolePermissions RolePermission[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId]) // DB-1: lookup de roles por tenant
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid())
+  key         String  @unique
+  description String?
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model Plan {
+  id            String  @id @default(uuid())
+  name          String
+  price         Decimal
+  maxSessions   Int     @map("max_sessions")
+  maxUsers      Int     @map("max_users")
+  maxBots       Int     @map("max_bots")
+  maxMessages   Int     @map("max_messages")
+  maxStorageMb  Int     @map("max_storage_mb")
+  maxAiRequests Int     @map("max_ai_requests")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  planId     String    @map("plan_id")
+  status     String    @default("trialing")
+  trialUntil DateTime? @map("trial_until")
+  startsAt   DateTime  @default(now()) @map("starts_at")
+  expiresAt  DateTime? @map("expires_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   Plan   @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, status]) // DB-9: consulta subscription ativa
+  @@map("subscriptions")
+}
+
+model WhatsappSession {
+  id                  String    @id @default(uuid())
+  tenantId            String    @map("tenant_id")
+  name                String
+  phone               String?
+  sessionName         String    @map("session_name")
+  evolutionInstanceId String?   @map("evolution_instance_id")
+  status              String    @default("disconnected")
+  qrCode              String?   @map("qr_code")
+  lastSeen            DateTime? @map("last_seen")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  settings      SessionSettings?
+  conversations Conversation[]
+
+  @@unique([sessionName]) // DB-8: lookup por Evolution webhook
+  @@index([tenantId, status]) // DB-8: listagem por status
+  @@map("whatsapp_sessions")
+}
+
+model SessionSettings {
+  id              String  @id @default(uuid())
+  sessionId       String  @unique @map("session_id")
+  webhookUrl      String? @map("webhook_url")
+  autoReconnect   Boolean @default(true) @map("auto_reconnect")
+  ignoreGroups    Boolean @default(true) @map("ignore_groups")
+  readMessages    Boolean @default(false) @map("read_messages")
+  typingIndicator Boolean @default(true) @map("typing_indicator")
+  presenceUpdate  Boolean @default(true) @map("presence_update")
+
+  session WhatsappSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("session_settings")
+}
+
+model Bot {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  name           String
+  description    String?
+  status         String   @default("draft")
+  defaultVersion Int?     @map("default_version")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  versions BotVersion[]
+
+  @@index([tenantId, status]) // DB-1: bots ativos por tenant
+  @@map("bots")
+}
+
+model BotVersion {
+  id          String  @id @default(uuid())
+  botId       String  @map("bot_id")
+  version     Int
+  description String?
+  published   Boolean @default(false)
+
+  bot       Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  rules     BotRule[]
+  variables BotVariable[]
+
+  @@unique([botId, version])
+  @@index([botId, published]) // DB-1: buscar versão publicada
+  @@map("bot_versions")
+}
+
+model BotRule {
+  id           String  @id @default(uuid())
+  botVersionId String  @map("bot_version_id")
+  priority     Int     @default(0)
+  trigger      String
+  responseType String  @map("response_type")
+  nextRule     String? @map("next_rule")
+
+  botVersion BotVersion @relation(fields: [botVersionId], references: [id], onDelete: Cascade)
+
+  @@map("bot_rules")
+}
+
+model BotVariable {
+  id           String  @id @default(uuid())
+  botVersionId String  @map("bot_version_id")
+  name         String
+  type         String
+  defaultValue String? @map("default_value")
+
+  botVersion BotVersion @relation(fields: [botVersionId], references: [id], onDelete: Cascade)
+
+  @@map("bot_variables")
+}
+
+model KnowledgeBase {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  name        String
+  description String?
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  documents KnowledgeDocument[]
+
+  @@map("knowledge_bases")
+}
+
+model KnowledgeDocument {
+  id              String  @id @default(uuid())
+  knowledgeBaseId String  @map("knowledge_base_id")
+  title           String
+  fileId          String? @map("file_id")
+  status          String  @default("processing")
+
+  knowledgeBase KnowledgeBase    @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  chunks        KnowledgeChunk[]
+
+  @@map("knowledge_documents")
+}
+
+model KnowledgeChunk {
+  id         String @id @default(uuid())
+  documentId String @map("document_id")
+  chunkIndex Int    @map("chunk_index")
+  content    String
+
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@map("knowledge_chunks")
+}
+
+model Contact {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  phone     String
+  name      String?
+  email     String?
+  avatar    String?
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant        Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+  tagRelations  ContactTagRelation[]
+
+  @@index([tenantId, phone]) // DB-1: lookup por phone dentro do tenant
+  @@index([phone]) // existente — mantido
+  @@map("contacts")
+}
+
+model ContactTag {
+  id       String  @id @default(uuid())
+  tenantId String  @map("tenant_id")
+  name     String
+  color    String?
+
+  relations ContactTagRelation[]
+
+  @@index([tenantId]) // DB-1: tags por tenant
+  @@map("contact_tags")
+}
+
+model ContactTagRelation {
+  contactId String @map("contact_id")
+  tagId     String @map("tag_id")
+
+  contact Contact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     ContactTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@map("contact_tag_relations")
+}
+
+model Conversation {
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  contactId     String    @map("contact_id")
+  sessionId     String    @map("session_id")
+  assignedUser  String?   @map("assigned_user")
+  status        String    @default("open")
+  priority      String    @default("normal")
+  lastMessageAt DateTime? @map("last_message_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact Contact         @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  session WhatsappSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  agent   User?           @relation("AssignedUser", fields: [assignedUser], references: [id])
+
+  messages    Message[]
+  assignments ConversationAssignment[]
+  notes       ConversationNote[]
+
+  @@index([lastMessageAt, contactId, sessionId]) // existente
+  @@index([tenantId, lastMessageAt]) // DB-1: listagem paginada por tenant
+  @@index([tenantId, status]) // DB-3: filtro por status
+  @@index([tenantId, assignedUser]) // DB-3: conversas do agente
+  @@index([contactId]) // DB-1: lookup por contato
+  @@map("conversations")
+}
+
+model Message {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  externalId     String?  @map("external_id")
+  direction      String
+  type           String
+  content        String?
+  mediaUrl       String?  @map("media_url")
+  status         String   @default("pending")
+  timestamp      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, externalId]) // DB-2: idempotência Evolution retry
+  @@index([conversationId, timestamp, status]) // existente
+  @@index([conversationId, timestamp]) // DB-2: paginação 50 últimas
+  @@map("messages")
+}
+
+model ConversationAssignment {
+  id             String    @id @default(uuid())
+  conversationId String    @map("conversation_id")
+  userId         String    @map("user_id")
+  assignedAt     DateTime  @default(now()) @map("assigned_at")
+  releasedAt     DateTime? @map("released_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId]) // DB-1: lookup por conversa
+  @@index([userId]) // DB-1: histórico de atribuições do user
+  @@map("conversation_assignments")
+}
+
+model ConversationNote {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  userId         String   @map("user_id")
+  content        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId]) // DB-1: notas por conversa
+  @@map("conversation_notes")
+}
+
+model FileAsset {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  storage   String
+  path      String
+  filename  String
+  mime      String
+  size      Int
+  checksum  String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt]) // DB-1: listar arquivos por tenant
+  @@map("files")
+}
+
+model Webhook {
+  id       String   @id @default(uuid())
+  tenantId String   @map("tenant_id")
+  name     String
+  url      String
+  secret   String
+  events   String[]
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId]) // DB-1: listagem por tenant
+  @@map("webhooks")
+}
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  name        String
+  keyHash     String    @map("key_hash")
+  prefix      String
+  permissions String[]
+  lastUsedAt  DateTime? @map("last_used_at")
+  expiresAt   DateTime? @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([prefix])
+  @@map("api_keys")
+}
+
+model Job {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  type        String
+  status      String    @default("pending")
+  payload     Json
+  attempts    Int       @default(0)
+  scheduledAt DateTime? @map("scheduled_at")
+  finishedAt  DateTime? @map("finished_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([status, type])
+  @@map("jobs")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  userId     String?  @map("user_id")
+  action     String
+  resource   String
+  resourceId String?  @map("resource_id")
+  oldValue   Json?    @map("old_value")
+  newValue   Json?    @map("new_value")
+  ip         String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull) // DB-12: SetNull em vez de Restrict
+
+  @@index([tenantId, createdAt]) // DB-6: consulta "últimos logs" por tenant
+  @@map("audit_logs")
+}
+
+model DailyMetric {
+  id                  String   @id @default(uuid())
+  tenantId            String   @map("tenant_id")
+  date                DateTime
+  messagesIn          Int      @default(0) @map("messages_in")
+  messagesOut         Int      @default(0) @map("messages_out")
+  newContacts         Int      @default(0) @map("new_contacts")
+  activeConversations Int      @default(0) @map("active_conversations")
+  humanAttendances    Int      @default(0) @map("human_attendances")
+  aiRequests          Int      @default(0) @map("ai_requests")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, date])
+  @@map("daily_metrics")
+}
