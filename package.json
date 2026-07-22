@@ -16,7 +16,14 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "worker": "node dist/src/worker.js"
+    "worker": "node dist/src/worker.js",
+    "stack:up": "docker compose up -d --build",
+    "stack:down": "docker compose down",
+    "stack:logs": "docker compose logs -f --tail=50 api worker",
+    "stack:ps": "docker compose ps",
+    "stack:migrate": "docker compose exec api npx prisma migrate deploy",
+    "stack:seed": "docker compose exec api npx prisma db seed",
+    "stack:prod": "docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.629.0",

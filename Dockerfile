@@ -38,7 +38,11 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Copia Prisma + build artifacts
+# Copia Prisma Client gerado pelo builder (não vem no --omit=dev)
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
+
+# Copia Prisma schema + build artifacts
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/dist ./dist
 
