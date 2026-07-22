@@ -29,7 +29,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
         ? exception.getStatus()
         : HttpStatus.INTERNAL_SERVER_ERROR;
 
-    const rawMessage =
+    const rawResponse =
       exception instanceof HttpException
         ? exception.getResponse()
         : 'Erro interno do servidor';
@@ -46,11 +46,23 @@ export class HttpExceptionFilter implements ExceptionFilter {
       });
     }
 
-    // Para o client: payloads de HttpException são seguros (criados pela app).
-    // Strings cruas ou errors 5xx viram mensagem genérica em produção.
-    let safeMessage: unknown = rawMessage;
-    if (status >= 500 && this.isProd && !(exception instanceof HttpException)) {
-      safeMessage = { message: 'Erro interno do servidor' };
+    // Normaliza para string | string[]. Nunca aninha objeto em `message`,
+    // pois o frontend (sonner/React) não sabe renderizar objeto como child.
+    let safeMessage: string | string[];
+    if (typeof rawResponse === 'string') {
+      safeMessage = rawResponse;
+    } else if (Array.isArray((rawResponse as { message?: unknown }).message)) {
+      // ValidationPipe BadRequest: { message: ['...', '...'], error: 'Bad Request' }
+      safeMessage = (rawResponse as { message: string[] }).message;
+    } else if (typeof (rawResponse as { message?: unknown }).message === 'string') {
+      safeMessage = (rawResponse as { message: string }).message;
+    } else if (Array.isArray(rawResponse)) {
+      safeMessage = rawResponse as string[];
+    } else if (this.isProd && status >= 500) {
+      safeMessage = 'Erro interno do servidor';
+    } else {
+      // Fallback: serializa qualquer formato exótico para evitar objeto no payload.
+      safeMessage = JSON.stringify(rawResponse);
     }
 
     response.status(status).json({

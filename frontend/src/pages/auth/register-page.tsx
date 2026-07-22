@@ -3,9 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { isAxiosError } from "axios";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { extractApiErrorMessage } from "@/lib/api-errors";
 import { AuthLayout } from "@/layouts/auth-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,13 +41,15 @@ export function RegisterPage() {
   async function onSubmit(values: RegisterFormValues) {
     setIsSubmitting(true);
     try {
-      await registerUser(values);
+      // Envia apenas os campos aceitos pelo backend (RegisterDto).
+      // `confirmPassword` é só validação client-side; com forbidNonWhitelisted
+      // no NestJS, enviá-lo provoca 400 "property confirmPassword should not exist".
+      const { confirmPassword: _confirmPassword, ...payload } = values;
+      await registerUser(payload);
       toast.success("Conta criada com sucesso");
       navigate("/dashboard", { replace: true });
     } catch (error) {
-      const message = isAxiosError(error)
-        ? (error.response?.data as { message?: string })?.message ?? "Não foi possível criar sua conta"
-        : "Não foi possível criar sua conta. Tente novamente.";
+      const message = extractApiErrorMessage(error, "Não foi possível criar sua conta");
       toast.error(message);
     } finally {
       setIsSubmitting(false);

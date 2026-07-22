@@ -3,9 +3,9 @@ import { Link, useLocation, useNavigate, type Location } from "react-router-dom"
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { isAxiosError } from "axios";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { extractApiErrorMessage } from "@/lib/api-errors";
 import { AuthLayout } from "@/layouts/auth-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,9 +40,7 @@ export function LoginPage() {
       const from = (location.state as { from?: Location })?.from?.pathname ?? "/dashboard";
       navigate(from, { replace: true });
     } catch (error) {
-      const message = isAxiosError(error)
-        ? (error.response?.data as { message?: string })?.message ?? "Credenciais inválidas"
-        : "Não foi possível entrar. Tente novamente.";
+      const message = extractApiErrorMessage(error, "Credenciais inválidas");
       toast.error(message);
     } finally {
       setIsSubmitting(false);
