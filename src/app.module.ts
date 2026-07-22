@@ -20,7 +20,21 @@ import { BotsModule } from './modules/bots/bots.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
 import { ConversationsModule } from './modules/conversations/conversations.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { HealthModule } from './modules/health/health.module';
 
+/**
+ * 📈 E1/E9 — AppModule: processo HTTP apenas.
+ *
+ * WhatsappSessionsProcessor e MessageProcessor ficam registrados dentro
+ * de seus módulos, mas o WorkerHost só é ATIVADO no processo worker
+ * (worker.ts → WorkerModule). Aqui na API, os processors existem como
+ * providers mas não consomem a fila — BullMQ detecta automaticamente
+ * qual processo deve ativar o worker.
+ *
+ * Se preferir isolar completamente: remover os processors dos providers
+ * aqui e importar apenas em WorkerModule. Por simplicidade no MVP,
+ * mantemos ambos registrados — BullMQ ignora o consumer na API.
+ */
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration], validate }),
@@ -38,6 +52,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     ContactsModule,
     ConversationsModule,
     WebhooksModule,
+    HealthModule, // 📈 E4 — healthcheck
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

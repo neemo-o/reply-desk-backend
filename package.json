@@ -6,14 +6,17 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "nest build",
+    "build": "nest build && nest build -p tsconfig.worker.json --",
+    "build:api": "nest build",
+    "build:worker": "nest build -p tsconfig.worker.json",
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "start:prod": "node dist/main.js",
+    "start:prod": "node dist/src/main.js",
+    "start:worker": "node dist/src/worker.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "worker": "node dist/worker.js"
+    "worker": "node dist/src/worker.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.629.0",
