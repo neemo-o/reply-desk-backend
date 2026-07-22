@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090d1b" />
+    <meta name="description" content="ReplyDesk — atendimento via WhatsApp automatizado com bots inteligentes, multiempresas e IA integrada." />
+    <title>ReplyDesk — Atendimento automatizado no WhatsApp</title>
+    <script>
+      // Evita flash de tema errado: aplica a classe antes do React montar.
+      (function () {
+        try {
+          var theme = localStorage.getItem("replydesk-theme");
+          var systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var resolved = theme && theme !== "system" ? theme : systemDark ? "dark" : "light";
+          if (resolved === "dark") {
+            document.documentElement.classList.add("dark");
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

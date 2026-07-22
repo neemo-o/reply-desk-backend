@@ -11,12 +11,17 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
 
   // 🔒 S1 — CORS whitelist (env-driven, fail-closed)
-  const allowedOrigins = (process.env.CORS_ORIGINS ?? '')
+  const rawOrigins = (process.env.CORS_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const isWildcard = rawOrigins.includes('*');
   app.enableCors({
-    origin: allowedOrigins.length ? allowedOrigins : false, // false = bloqueia tudo se não configurado
+    origin: isWildcard
+      ? true
+      : rawOrigins.length
+        ? rawOrigins
+        : false, // false = bloqueia tudo se não configurado
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],

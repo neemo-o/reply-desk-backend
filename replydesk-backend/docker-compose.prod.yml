@@ -74,7 +74,7 @@ services:
   api:
     build:
       context: .
-      target: api
+      dockerfile: Dockerfile
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -112,7 +112,8 @@ services:
   worker:
     build:
       context: .
-      target: worker
+      dockerfile: Dockerfile
+    command: ["node", "dist/src/worker.js"]
     environment:
       NODE_ENV: production
       DATABASE_URL: ${DATABASE_URL}
