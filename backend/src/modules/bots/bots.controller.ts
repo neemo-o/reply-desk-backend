@@ -3,9 +3,10 @@ import { BotsService } from './bots.service';
 import { CreateBotDto } from './dto/create-bot.dto';
 import { CreateBotRuleDto } from './dto/create-bot-rule.dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
+import { SubscriptionGuard } from '../../common/guards/subscription.guard';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 
-@UseGuards(TenantGuard)
+@UseGuards(TenantGuard, SubscriptionGuard)
 @Controller('bots')
 export class BotsController {
   constructor(private readonly botsService: BotsService) {}

@@ -48,6 +48,19 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   CORS_ORIGINS?: string;
+
+  // 🔒 Mercado Pago — access token da conta (produção ou teste) e secret do webhook
+  @IsOptional()
+  @IsString()
+  MERCADOPAGO_ACCESS_TOKEN?: string;
+
+  @IsOptional()
+  @IsString()
+  MERCADOPAGO_WEBHOOK_SECRET?: string;
+
+  @IsOptional()
+  @IsString()
+  MERCADOPAGO_BACK_URL?: string;
 }
 
 export function validate(config: Record<string, unknown>) {
@@ -70,6 +83,11 @@ export function validate(config: Record<string, unknown>) {
     }
     if (!validatedConfig.CORS_ORIGINS) {
       throw new Error('CORS_ORIGINS é obrigatório em produção — defina as origens permitidas separadas por vírgula.');
+    }
+    if (!validatedConfig.MERCADOPAGO_ACCESS_TOKEN || !validatedConfig.MERCADOPAGO_WEBHOOK_SECRET) {
+      throw new Error(
+        'MERCADOPAGO_ACCESS_TOKEN e MERCADOPAGO_WEBHOOK_SECRET são obrigatórios em produção.',
+      );
     }
   }
 

@@ -8,6 +8,7 @@ import { CreateConversationDto } from './dto/create-conversation.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { AssignConversationDto } from './dto/assign-conversation.dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
+import { SubscriptionGuard } from '../../common/guards/subscription.guard';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { isUuid } from '../../common/utils/security';
 import { MESSAGE_QUEUE } from '../queue/queue.module';
@@ -29,7 +30,7 @@ class ListConversationsQuery {
   take?: number;
 }
 
-@UseGuards(TenantGuard)
+@UseGuards(TenantGuard, SubscriptionGuard)
 @Controller('conversations')
 export class ConversationsController {
   constructor(

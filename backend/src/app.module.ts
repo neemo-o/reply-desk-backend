@@ -15,6 +15,7 @@ import { QueueModule } from './modules/queue/queue.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { WhatsappSessionsModule } from './modules/whatsapp-sessions/whatsapp-sessions.module';
 import { BotsModule } from './modules/bots/bots.module';
 import { ContactsModule } from './modules/contacts/contacts.module';
@@ -51,6 +52,7 @@ import { HealthModule } from './modules/health/health.module';
     AuthModule,
     UsersModule,
     TenantsModule,
+    SubscriptionsModule,
     WhatsappSessionsModule,
     BotsModule,
     ContactsModule,

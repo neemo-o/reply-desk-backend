@@ -4,6 +4,7 @@ import { Queue } from 'bullmq';
 import { WhatsappSessionsService } from './whatsapp-sessions.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
+import { SubscriptionGuard } from '../../common/guards/subscription.guard';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { isUuid } from '../../common/utils/security';
 import { SESSION_QUEUE } from '../queue/queue.module';
@@ -15,7 +16,7 @@ class ListSessionsQuery {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) take?: number;
 }
 
-@UseGuards(TenantGuard)
+@UseGuards(TenantGuard, SubscriptionGuard)
 @Controller('whatsapp-sessions')
 export class WhatsappSessionsController {
   constructor(

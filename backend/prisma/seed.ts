@@ -33,21 +33,38 @@ async function main() {
     });
   }
 
-  await prisma.plan.upsert({
-    where: { id: 'free-plan' },
-    update: {},
-    create: {
-      id: 'free-plan',
-      name: 'Free',
-      price: 0,
+  const PLANS = [
+    {
+      id: 'basic-plan',
+      name: 'Basic',
+      price: 49.9,
       maxSessions: 1,
       maxUsers: 3,
       maxBots: 1,
-      maxMessages: 1000,
+      maxMessages: 2000,
       maxStorageMb: 512,
-      maxAiRequests: 100,
+      maxAiRequests: 0, // sem IA — fluxo por opções/regras
     },
-  });
+    {
+      id: 'premium-plan',
+      name: 'Premium',
+      price: 99.9,
+      maxSessions: 3,
+      maxUsers: 10,
+      maxBots: 5,
+      maxMessages: 10000,
+      maxStorageMb: 2048,
+      maxAiRequests: 5000,
+    },
+  ];
+
+  for (const plan of PLANS) {
+    await prisma.plan.upsert({
+      where: { id: plan.id },
+      update: plan,
+      create: plan,
+    });
+  }
 
   console.log('Seed concluído (apenas dev/staging)');
   await prisma.$disconnect();
