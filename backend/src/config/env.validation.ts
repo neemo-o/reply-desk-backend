@@ -1,5 +1,5 @@
 import { plainToInstance } from 'class-transformer';
-import { IsEnum, IsNumber, IsOptional, IsString, MinLength, validateSync } from 'class-validator';
+import { IsEnum, IsNumber, IsOptional, IsString, Matches, MinLength, validateSync } from 'class-validator';
 
 enum Environment {
   Development = 'development',
@@ -60,6 +60,7 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
+  @Matches(/^https:\/\//, { message: 'MERCADOPAGO_BACK_URL deve ser uma URL HTTPS — o Mercado Pago rejeita HTTP' })
   MERCADOPAGO_BACK_URL?: string;
 }
 

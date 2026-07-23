@@ -68,43 +68,87 @@ export class SubscriptionsService {
     });
     if (!owner) throw new NotFoundException('Owner do tenant não encontrado');
 
-    const current = await this.prisma.subscription.findFirst({
-      where: { tenantId },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (current && this.isActive(current) && current.status === 'active') {
-      throw new ConflictException('Este tenant já possui uma assinatura ativa');
-    }
-
     const rawBackUrl = this.config.get<string>('mercadoPago.backUrl');
     if (!rawBackUrl) {
       throw new BadRequestException('MERCADOPAGO_BACK_URL não configurada');
     }
 
-    // Reaproveita a subscription pendente existente (evita lixo de registros a cada retry do usuário).
-    const subscriptionId = current && current.status === 'pending' ? current.id : randomUUID();
+    // 🔒 P1 — Lock de advisory lock por tenant dentro de transação elimina a
+    // race condition. O lock pessimista em SELECT ... FOR UPDATE falha quando
+    // não existe linha ainda (primeiro checkout) — múltiplos threads viam
+    // rows=[] e cada um criava uma subscription distinta.
+    //
+    // pg_advisory_xact_lock(hashtext(tenantId)) funciona mesmo sem linha
+    // existente: o primeiro thread que chega trava o lock; os demais ficam
+    // bloqueados até o commit. O lock é liberado automaticamente ao fim da
+    // transação (xact = transaction-scoped).
+    return this.prisma.$transaction(async (tx) => {
+      // Advisory lock por tenant — serializa o checkout inteiro.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${tenantId}))`;
 
-    const preapproval = await this.mercadoPago.createPreapproval({
-      reason: `ReplyDesk — Plano ${plan.name}`,
-      externalReference: subscriptionId,
-      payerEmail: owner.user.email,
-      amount: Number(plan.price),
-      backUrl: rawBackUrl,
+      // Agora segura o lock: lê a subscription mais recente do tenant.
+      const rows = await tx.$queryRaw<
+        Array<{ id: string; status: string; external_id: string | null; plan_id: string }>
+      >`SELECT id, status, external_id, plan_id FROM subscriptions WHERE tenant_id = ${tenantId} ORDER BY created_at DESC LIMIT 1`;
+
+      const current = rows[0]
+        ? { id: rows[0].id, status: rows[0].status, externalId: rows[0].external_id, planId: rows[0].plan_id }
+        : null;
+
+      // Bloqueia se já tem assinatura ativa válida.
+      if (current && this.isActive({ status: current.status, trialUntil: null, expiresAt: null }) && current.status === 'active') {
+        throw new ConflictException('Este tenant já possui uma assinatura ativa');
+      }
+
+      // 🔒 P3 — Se já existe assinatura pending com externalId válido, reusa o
+      // preapproval existente no MP e retorna seu init_point. NÃO cria um novo
+      // preapproval a cada retry do usuário — isso sobrescreveria o externalId
+      // e invalidaria webhooks já enviados para o preapproval anterior.
+      if (current && current.status === 'pending' && current.externalId) {
+        let existingPreapproval;
+        try {
+          existingPreapproval = await this.mercadoPago.getPreapproval(current.externalId);
+        } catch {
+          // Se o MP não encontra o preapproval (foi cancelado/expirou), cria novo.
+          this.logger.warn(`Preapproval ${current.externalId} não encontrado no MP — criando novo`);
+        }
+        if (existingPreapproval && existingPreapproval.init_point) {
+          // Atualiza planId caso o usuário esteja trocando de plano.
+          if (current.planId !== plan.id) {
+            await tx.subscription.update({
+              where: { id: current.id },
+              data: { planId: plan.id },
+            });
+          }
+          return { checkoutUrl: existingPreapproval.init_point, subscriptionId: current.id };
+        }
+      }
+
+      // Não há preapproval reusável — cria um novo no MP.
+      const subscriptionId = current && current.status === 'pending' ? current.id : randomUUID();
+
+      const preapproval = await this.mercadoPago.createPreapproval({
+        reason: `ReplyDesk — Plano ${plan.name}`,
+        externalReference: subscriptionId,
+        payerEmail: owner.user.email,
+        amount: Number(plan.price),
+        backUrl: rawBackUrl,
+      });
+
+      await tx.subscription.upsert({
+        where: { id: subscriptionId },
+        update: { planId: plan.id, status: 'pending', externalId: preapproval.id },
+        create: {
+          id: subscriptionId,
+          tenantId,
+          planId: plan.id,
+          status: 'pending',
+          externalId: preapproval.id,
+        },
+      });
+
+      return { checkoutUrl: preapproval.init_point, subscriptionId };
     });
-
-    await this.prisma.subscription.upsert({
-      where: { id: subscriptionId },
-      update: { planId: plan.id, status: 'pending', externalId: preapproval.id },
-      create: {
-        id: subscriptionId,
-        tenantId,
-        planId: plan.id,
-        status: 'pending',
-        externalId: preapproval.id,
-      },
-    });
-
-    return { checkoutUrl: preapproval.init_point, subscriptionId };
   }
 
   /**

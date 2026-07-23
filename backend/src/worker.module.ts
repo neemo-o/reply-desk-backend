@@ -9,6 +9,7 @@ import { LoggerModule } from './common/logger/logger.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { WhatsappSessionsModule } from './modules/whatsapp-sessions/whatsapp-sessions.module';
 import { ConversationsModule } from './modules/conversations/conversations.module';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 
 /**
  * 📈 E1 — WorkerModule: contexto NestJS para o processo worker.
@@ -16,9 +17,16 @@ import { ConversationsModule } from './modules/conversations/conversations.modul
  * Importa apenas módulos necessários para consumir filas:
  * - QueueModule (BullMQ setup + queues)
  * - WhatsappSessionsModule (SessionProcessor)
- * - ConversationsModule (MessageProcessor)
+ * - ConversationsModule (ConversationsService (para MessageProcessor)
  *
- * NOTA: controllers NÃO são importados — worker não serve HTTP.
+ * SubscriptionsModule é necessário porque ConversationsController (registrado
+ * em ConversationsModule) usa @UseGuards(SubscriptionGuard), que injeta
+ * SubscriptionsService. Sem este import, o DI do Nest falha no boot do worker.
+ * SubscriptionsModule é @Global() na AppModule, mas no WorkerModule precisa
+ * ser importado explicitamente porque é um contexto de aplicação separado.
+ *
+ * NOTA: controllers NÃO servem HTTP no worker, mas ainda são instanciados
+ * pelo DI do Nest, então suas dependências devem ser resolvíveis.
  * NOTA: throttler/JWT/CORS não são necessários aqui.
  */
 @Module({
@@ -29,6 +37,7 @@ import { ConversationsModule } from './modules/conversations/conversations.modul
     PrismaModule,
     RedisModule,
     QueueModule,
+    SubscriptionsModule,   // resolve SubscriptionGuard → SubscriptionsService
     WhatsappSessionsModule, // contém WhatsappSessionsProcessor
     ConversationsModule,    // contém ConversationsService (para MessageProcessor)
   ],
