@@ -1,14 +1,19 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { promisify } from 'util';
+import { resolveMx } from 'dns';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { TokensService } from './tokens.service';
 import { EmailVerificationService } from './email-verification.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+
+const resolveMxAsync = promisify(resolveMx);
 
 /**
  * 🔒 P3 — argon2.hash com custos ajustados para 2vCPU/4GB.
@@ -19,6 +24,48 @@ const ARGON2_OPTS = {
   timeCost: 2,
   parallelism: 1,
 } as const;
+
+// 🔒 E6 — Domínios descartáveis conhecidos que geram email temporário.
+// Bloqueados no registro para evitar abuso. Lista não exaustiva.
+const BLOCKED_EMAIL_DOMAINS = new Set([
+  'mailinator.com',
+  'guerrillamail.com',
+  'tempmail.com',
+  'throwaway.email',
+  '10minutemail.com',
+  'yopmail.com',
+  'trashmail.com',
+  'getnada.com',
+  'dispostable.com',
+  'sharklasers.com',
+]);
+
+/**
+ * 🔒 E6 — Verifica se o domínio do email tem MX record válido.
+ * Rejeita emails de domínios que não recebem email (ex: domínios fake).
+ * Timeout de 3s para não bloquear o registro se DNS estiver lento.
+ */
+async function isValidEmailDomain(email: string): Promise<boolean> {
+  const domain = email.split('@')[1];
+  if (!domain) return false;
+
+  // Bloqueia domínios descartáveis conhecidos
+  if (BLOCKED_EMAIL_DOMAINS.has(domain.toLowerCase())) return false;
+
+  try {
+    const mxRecords = await Promise.race([
+      resolveMxAsync(domain),
+      new Promise<null>((_, reject) =>
+        setTimeout(() => reject(new Error('DNS timeout')), 3000),
+      ),
+    ]);
+    return mxRecords !== null && mxRecords !== undefined && mxRecords.length > 0;
+  } catch {
+    // Se o DNS falhar (timeout ou erro), assume válido para não bloquear
+    // usuários legítimos por problemas de infra. O SMTP real fará a validação final.
+    return true;
+  }
+}
 
 @Injectable()
 export class AuthService {
@@ -34,6 +81,12 @@ export class AuthService {
     });
     if (existing) {
       throw new ConflictException('E-mail já cadastrado');
+    }
+
+    // 🔒 E6 — Valida domínio do email (MX record + blocklist de descartáveis)
+    const validDomain = await isValidEmailDomain(dto.email);
+    if (!validDomain) {
+      throw new BadRequestException('Domínio de e-mail inválido ou não aceita recebimento de mensagens');
     }
 
     const passwordHash = await argon2.hash(dto.password, ARGON2_OPTS);

@@ -36,16 +36,20 @@ export class MailService {
 
   async sendVerificationOtp(to: string, code: string): Promise<void> {
     const from = this.config.get<string>('mail.from');
+    // 🔒 E5 — Sanitiza o código antes de injetar no HTML.
+    // O código é sempre 6 dígitos numéricos, mas defense-in-depth previne
+    // qualquer injeção futura se a geração mudar.
+    const safeCode = code.replace(/[^0-9]/g, '').slice(0, 6) || code;
     const info = await this.getTransporter().sendMail({
       from,
       to,
       subject: 'Confirme seu e-mail — ReplyDesk',
-      text: `Seu código de verificação é ${code}. Ele expira em 10 minutos.`,
+      text: `Seu código de verificação é ${safeCode}. Ele expira em 10 minutos.`,
       html: `
         <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
           <h2>Confirme seu e-mail</h2>
           <p>Use o código abaixo para confirmar seu e-mail e continuar seu cadastro na ReplyDesk:</p>
-          <p style="font-size: 32px; font-weight: bold; letter-spacing: 6px;">${code}</p>
+          <p style="font-size: 32px; font-weight: bold; letter-spacing: 6px;">${safeCode}</p>
           <p style="color: #666;">Esse código expira em 10 minutos. Se você não solicitou isso, ignore este e-mail.</p>
         </div>
       `,

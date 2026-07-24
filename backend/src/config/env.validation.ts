@@ -91,6 +91,9 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
+  @Matches(/^[^@]+@[^@]+\.[^@]+|^.+<[^@]+@[^@]+\.[^@]+>$/, {
+    message: 'MAIL_FROM deve ser um e-mail válido ou formato "Nome <email@dominio.com>"',
+  })
   MAIL_FROM?: string;
 }
 
