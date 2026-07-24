@@ -9,7 +9,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { MercadoPagoService } from './mercado-pago.service';
+import { StripeService } from './stripe.service';
+import type Stripe from 'stripe';
 
 interface SubscriptionLike {
   status: string;
@@ -21,6 +22,8 @@ function isUniqueConstraintError(err: unknown): boolean {
   return !!err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === 'P2002';
 }
 
+export type BillingType = 'recurring' | 'one_time';
+
 @Injectable()
 export class SubscriptionsService {
   private readonly logger = new Logger(SubscriptionsService.name);
@@ -28,13 +31,13 @@ export class SubscriptionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    private readonly mercadoPago: MercadoPagoService,
+    private readonly stripe: StripeService,
   ) {}
 
   /**
    * Uma assinatura é considerada ativa se:
    * - status "trialing" e o período de trial ainda não expirou; ou
-   * - status "active" e não passou da data de expiração (ou não tem expiração definida).
+   * - status "active" e não passou da data de expiração.
    * Qualquer outro status (pending, past_due, cancelled) bloqueia o acesso.
    */
   isActive(subscription: SubscriptionLike): boolean {
@@ -58,9 +61,23 @@ export class SubscriptionsService {
     return { ...subscription, isActive: this.isActive(subscription) };
   }
 
-  async createCheckout(tenantId: string, planId: string) {
+  /**
+   * Cria uma sessão de checkout no Stripe.
+   * - billingType "recurring": assinatura mensal automática (cartão de crédito)
+   * - billingType "one_time": pagamento único (cartão ou Pix, 1 mês de acesso)
+   */
+  async createCheckout(tenantId: string, planId: string, billingType: BillingType = 'recurring') {
     const plan = await this.prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) throw new NotFoundException('Plano não encontrado');
+
+    // Valida que o plano tem o price ID do Stripe para o tipo de cobrança
+    const priceId =
+      billingType === 'recurring' ? plan.stripePriceRecurringId : plan.stripePriceOneTimeId;
+    if (!priceId) {
+      throw new BadRequestException(
+        `Plano não configurado no Stripe para pagamento ${billingType === 'recurring' ? 'recorrente' : 'único'}`,
+      );
+    }
 
     const owner = await this.prisma.tenantUser.findFirst({
       where: { tenantId, role: { name: 'owner' } },
@@ -68,163 +85,243 @@ export class SubscriptionsService {
     });
     if (!owner) throw new NotFoundException('Owner do tenant não encontrado');
 
-    const rawBackUrl = this.config.get<string>('mercadoPago.backUrl');
-    if (!rawBackUrl) {
-      throw new BadRequestException('MERCADOPAGO_BACK_URL não configurada');
+    const successUrl = this.config.get<string>('stripe.checkoutSuccessUrl');
+    const cancelUrl = this.config.get<string>('stripe.checkoutCancelUrl');
+    if (!successUrl || !cancelUrl) {
+      throw new BadRequestException('STRIPE_CHECKOUT_SUCCESS_URL/CANCEL_URL não configuradas');
     }
 
-    // 🔒 P1 — Lock de advisory lock por tenant dentro de transação elimina a
-    // race condition. O lock pessimista em SELECT ... FOR UPDATE falha quando
-    // não existe linha ainda (primeiro checkout) — múltiplos threads viam
-    // rows=[] e cada um criava uma subscription distinta.
-    //
-    // pg_advisory_xact_lock(hashtext(tenantId)) funciona mesmo sem linha
-    // existente: o primeiro thread que chega trava o lock; os demais ficam
-    // bloqueados até o commit. O lock é liberado automaticamente ao fim da
-    // transação (xact = transaction-scoped).
+    // 🔒 Advisory lock por tenant — serializa o checkout, elimina race condition
     return this.prisma.$transaction(async (tx) => {
-      // Advisory lock por tenant — serializa o checkout inteiro.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${tenantId}))`;
 
-      // Agora segura o lock: lê a subscription mais recente do tenant.
       const rows = await tx.$queryRaw<
-        Array<{ id: string; status: string; external_id: string | null; plan_id: string }>
-      >`SELECT id, status, external_id, plan_id FROM subscriptions WHERE tenant_id = ${tenantId} ORDER BY created_at DESC LIMIT 1`;
+        Array<{ id: string; status: string; external_id: string | null; plan_id: string; billing_type: string }>
+      >`SELECT id, status, external_id, plan_id, billing_type FROM subscriptions WHERE tenant_id = ${tenantId} ORDER BY created_at DESC LIMIT 1`;
 
       const current = rows[0]
-        ? { id: rows[0].id, status: rows[0].status, externalId: rows[0].external_id, planId: rows[0].plan_id }
+        ? {
+            id: rows[0].id,
+            status: rows[0].status,
+            externalId: rows[0].external_id,
+            planId: rows[0].plan_id,
+            billingType: rows[0].billing_type,
+          }
         : null;
 
-      // Bloqueia se já tem assinatura ativa válida.
+      // Bloqueia se já tem assinatura ativa válida
       if (current && this.isActive({ status: current.status, trialUntil: null, expiresAt: null }) && current.status === 'active') {
         throw new ConflictException('Este tenant já possui uma assinatura ativa');
       }
 
-      // 🔒 P3 — Se já existe assinatura pending com externalId válido, reusa o
-      // preapproval existente no MP e retorna seu init_point. NÃO cria um novo
-      // preapproval a cada retry do usuário — isso sobrescreveria o externalId
-      // e invalidaria webhooks já enviados para o preapproval anterior.
-      if (current && current.status === 'pending' && current.externalId) {
-        let existingPreapproval;
-        try {
-          existingPreapproval = await this.mercadoPago.getPreapproval(current.externalId);
-        } catch {
-          // Se o MP não encontra o preapproval (foi cancelado/expirou), cria novo.
-          this.logger.warn(`Preapproval ${current.externalId} não encontrado no MP — criando novo`);
-        }
-        if (existingPreapproval && existingPreapproval.init_point) {
-          // Atualiza planId caso o usuário esteja trocando de plano.
-          if (current.planId !== plan.id) {
-            await tx.subscription.update({
-              where: { id: current.id },
-              data: { planId: plan.id },
-            });
-          }
-          return { checkoutUrl: existingPreapproval.init_point, subscriptionId: current.id };
-        }
-      }
-
-      // Não há preapproval reusável — cria um novo no MP.
+      // Reusa subscription pending existente
       const subscriptionId = current && current.status === 'pending' ? current.id : randomUUID();
 
-      const preapproval = await this.mercadoPago.createPreapproval({
-        reason: `ReplyDesk — Plano ${plan.name}`,
-        externalReference: subscriptionId,
-        payerEmail: owner.user.email,
-        amount: Number(plan.price),
-        backUrl: rawBackUrl,
-      });
+      const checkoutInput = {
+        priceId,
+        customerEmail: owner.user.email,
+        tenantId,
+        subscriptionId,
+        successUrl,
+        cancelUrl,
+      };
+
+      let result: { checkoutUrl: string; sessionId: string };
+      if (billingType === 'recurring') {
+        result = await this.stripe.createRecurringCheckoutSession(checkoutInput);
+      } else {
+        result = await this.stripe.createOneTimeCheckoutSession(checkoutInput);
+      }
 
       await tx.subscription.upsert({
-        where: { id: subscriptionId },
-        update: { planId: plan.id, status: 'pending', externalId: preapproval.id },
-        create: {
-          id: subscriptionId,
-          tenantId,
-          planId: plan.id,
-          status: 'pending',
-          externalId: preapproval.id,
-        },
-      });
+              where: { id: subscriptionId },
+              update: {
+                planId: plan.id,
+                status: 'pending',
+                externalId: result.sessionId,
+                billingType,
+              },
+              create: {
+                id: subscriptionId,
+                tenantId,
+                planId: plan.id,
+                status: 'pending',
+                externalId: result.sessionId,
+                billingType,
+              },
+            });
 
-      return { checkoutUrl: preapproval.init_point, subscriptionId };
+            return { checkoutUrl: result.checkoutUrl, subscriptionId, billingType };
+          });
+        }
+
+  /**
+   * Cancela a assinatura ativa do tenant.
+   * Para recorrente: cancela no Stripe (para de cobrar).
+   * Para pagamento único: apenas marca como cancelled no DB.
+   */
+  async cancelSubscription(tenantId: string) {
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { tenantId, status: { in: ['active', 'past_due', 'pending'] } },
+      orderBy: { createdAt: 'desc' },
     });
+
+    if (!subscription) {
+      throw new NotFoundException('Nenhuma assinatura ativa encontrada');
+    }
+
+    // Se for recorrente, cancela no Stripe
+    if (subscription.billingType === 'recurring' && subscription.externalId) {
+      // externalId pode ser o session ID ou subscription ID do Stripe
+      // Tenta buscar a subscription do Stripe via session
+      try {
+        const session = await this.stripe.client.checkout.sessions.retrieve(subscription.externalId);
+        if (session.subscription) {
+          await this.stripe.cancelSubscription(session.subscription as string);
+        }
+      } catch (err) {
+        this.logger.warn(`Erro ao cancelar no Stripe: ${(err as Error).message}`);
+        // Continua e marca como cancelled no DB mesmo se Stripe falhar
+      }
+    }
+
+    await this.prisma.subscription.update({
+      where: { id: subscription.id },
+      data: { status: 'cancelled' },
+    });
+
+    return { cancelled: true, subscriptionId: subscription.id };
   }
 
   /**
-   * 🔒 Processa notificações do Mercado Pago com validação de assinatura HMAC e
-   * idempotência (via PaymentWebhookEvent) — a mesma notificação pode chegar
-   * mais de uma vez (retries do MP) e nunca deve ser aplicada duas vezes.
+   * 🔒 Processa webhooks do Stripe com validação de assinatura e idempotência.
    */
-  async handleWebhookNotification(
-    body: Record<string, any> | undefined,
-    headers: Record<string, string | undefined>,
-    query: Record<string, string | undefined>,
-  ) {
-    const notificationId = String(body?.id ?? query.id ?? '');
-    const dataId = String(body?.data?.id ?? query['data.id'] ?? '');
-    const type = String(body?.type ?? query.type ?? '');
+  async handleWebhookEvent(event: Stripe.Event) {
+    const eventId = event.id;
+    const eventType = event.type;
 
-    if (!dataId) {
-      throw new BadRequestException('Notificação sem data.id');
-    }
-
-    const signatureValid = this.mercadoPago.verifyWebhookSignature({
-      signatureHeader: headers['x-signature'],
-      requestId: headers['x-request-id'],
-      dataId,
-    });
-    if (!signatureValid) {
-      this.logger.warn(`Webhook Mercado Pago rejeitado — assinatura inválida (dataId=${dataId})`);
-      throw new ForbiddenException('Assinatura inválida');
-    }
-
-    const dedupeKey = notificationId || `${type}:${dataId}`;
+    // Idempotência — mesmo evento nunca é processado duas vezes
     try {
       await this.prisma.paymentWebhookEvent.create({
-        data: { provider: 'mercadopago', externalId: dedupeKey, eventType: type },
+        data: { provider: 'stripe', externalId: eventId, eventType },
       });
     } catch (err) {
       if (isUniqueConstraintError(err)) {
-        this.logger.log(`Notificação ${dedupeKey} já processada — ignorada`);
+        this.logger.log(`Evento Stripe ${eventId} já processado — ignorado`);
         return { received: true, duplicate: true };
       }
       throw err;
     }
 
-    if (type !== 'subscription_preapproval' && type !== 'preapproval') {
-      return { received: true, ignored: true };
+    switch (eventType) {
+      case 'checkout.session.completed': {
+        await this.handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
+        break;
+      }
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted': {
+        await this.handleSubscriptionUpdate(event.data.object as Stripe.Subscription);
+        break;
+      }
+      default: {
+        this.logger.log(`Evento Stripe ${eventType} ignorado`);
+        return { received: true, ignored: true };
+      }
     }
 
-    const subscription = await this.prisma.subscription.findUnique({ where: { externalId: dataId } });
+    return { received: true };
+  }
+
+  /**
+   * Quando o checkout é completado — atualiza a subscription local.
+   * Para recurring: o Stripe já criou a subscription, pegamos o ID.
+   * Para one_time: o pagamento foi confirmado, damos 1 mês de acesso.
+   */
+  private async handleCheckoutCompleted(session: Stripe.Checkout.Session) {
+    const tenantId = session.client_reference_id;
+    if (!tenantId) {
+      this.logger.warn('Checkout sem client_reference_id');
+      return;
+    }
+
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { tenantId, externalId: session.id },
+      orderBy: { createdAt: 'desc' },
+    });
+
     if (!subscription) {
-      this.logger.warn(`Nenhuma subscription local encontrada para preapproval ${dataId}`);
-      return { received: true, ignored: true };
+      this.logger.warn(`Nenhuma subscription local para session ${session.id}`);
+      return;
     }
 
-    const preapproval = await this.mercadoPago.getPreapproval(dataId);
-    const status = this.mapMercadoPagoStatus(preapproval.status);
+    if (session.mode === 'subscription' && session.subscription) {
+      // Recorrente: atualiza externalId para o subscription ID do Stripe
+      const stripeSubId = session.subscription as string;
+      await this.prisma.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          status: 'active',
+          externalId: stripeSubId,
+          lastPaymentId: session.payment_intent as string,
+          startsAt: new Date(),
+          expiresAt: this.oneMonthFromNow(),
+        },
+      });
+    } else if (session.mode === 'payment') {
+      // Pagamento único: ativa por 1 mês
+      await this.prisma.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          status: 'active',
+          lastPaymentId: session.payment_intent as string,
+          startsAt: new Date(),
+          expiresAt: this.oneMonthFromNow(),
+        },
+      });
+    }
+  }
+
+  /**
+   * Quando o Stripe atualiza/cancela uma assinatura recorrente.
+   * Sincroniza o status do Stripe com o banco local.
+   */
+  private async handleSubscriptionUpdate(stripeSubscription: Stripe.Subscription) {
+    const subscription = await this.prisma.subscription.findUnique({
+      where: { externalId: stripeSubscription.id },
+    });
+
+    if (!subscription) {
+      this.logger.warn(`Nenhuma subscription local para Stripe sub ${stripeSubscription.id}`);
+      return;
+    }
+
+    const status = this.mapStripeStatus(stripeSubscription.status);
+    const currentPeriodEnd = stripeSubscription.current_period_end
+      ? new Date(stripeSubscription.current_period_end * 1000)
+      : null;
 
     await this.prisma.subscription.update({
       where: { id: subscription.id },
       data: {
         status,
-        lastPaymentId: dataId,
-        expiresAt: status === 'active' ? this.oneMonthFromNow() : subscription.expiresAt,
+        expiresAt: currentPeriodEnd,
       },
     });
-
-    return { received: true };
   }
 
-  private mapMercadoPagoStatus(mpStatus: string): string {
-    switch (mpStatus) {
-      case 'authorized':
+  private mapStripeStatus(stripeStatus: string): string {
+    switch (stripeStatus) {
+      case 'active':
+      case 'trialing':
         return 'active';
-      case 'paused':
+      case 'past_due':
+      case 'unpaid':
         return 'past_due';
-      case 'cancelled':
+      case 'canceled':
         return 'cancelled';
+      case 'incomplete':
+      case 'incomplete_expired':
+        return 'pending';
       default:
         return 'pending';
     }

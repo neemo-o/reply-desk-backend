@@ -49,19 +49,24 @@ class EnvironmentVariables {
   @IsString()
   CORS_ORIGINS?: string;
 
-  // 🔒 Mercado Pago — access token da conta (produção ou teste) e secret do webhook
+  // 🔒 Stripe — chaves de API e webhook
   @IsOptional()
   @IsString()
-  MERCADOPAGO_ACCESS_TOKEN?: string;
+  STRIPE_SECRET_KEY?: string;
 
   @IsOptional()
   @IsString()
-  MERCADOPAGO_WEBHOOK_SECRET?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
 
   @IsOptional()
   @IsString()
-  @Matches(/^https:\/\//, { message: 'MERCADOPAGO_BACK_URL deve ser uma URL HTTPS — o Mercado Pago rejeita HTTP' })
-  MERCADOPAGO_BACK_URL?: string;
+  @Matches(/^https:\/\//, { message: 'STRIPE_CHECKOUT_SUCCESS_URL deve ser HTTPS' })
+  STRIPE_CHECKOUT_SUCCESS_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^https:\/\//, { message: 'STRIPE_CHECKOUT_CANCEL_URL deve ser HTTPS' })
+  STRIPE_CHECKOUT_CANCEL_URL?: string;
 }
 
 export function validate(config: Record<string, unknown>) {
@@ -85,10 +90,13 @@ export function validate(config: Record<string, unknown>) {
     if (!validatedConfig.CORS_ORIGINS) {
       throw new Error('CORS_ORIGINS é obrigatório em produção — defina as origens permitidas separadas por vírgula.');
     }
-    if (!validatedConfig.MERCADOPAGO_ACCESS_TOKEN || !validatedConfig.MERCADOPAGO_WEBHOOK_SECRET) {
+    if (!validatedConfig.STRIPE_SECRET_KEY || !validatedConfig.STRIPE_WEBHOOK_SECRET) {
       throw new Error(
-        'MERCADOPAGO_ACCESS_TOKEN e MERCADOPAGO_WEBHOOK_SECRET são obrigatórios em produção.',
+        'STRIPE_SECRET_KEY e STRIPE_WEBHOOK_SECRET são obrigatórios em produção.',
       );
+    }
+    if (!validatedConfig.STRIPE_CHECKOUT_SUCCESS_URL || !validatedConfig.STRIPE_CHECKOUT_CANCEL_URL) {
+      throw new Error('STRIPE_CHECKOUT_SUCCESS_URL e STRIPE_CHECKOUT_CANCEL_URL são obrigatórios em produção.');
     }
   }
 

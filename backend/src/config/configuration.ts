@@ -25,10 +25,11 @@ export default () => ({
     url: process.env.EVOLUTION_API_URL,
     apiKey: process.env.EVOLUTION_API_KEY,
   },
-  mercadoPago: {
-    accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN,
-    webhookSecret: process.env.MERCADOPAGO_WEBHOOK_SECRET,
-    backUrl: process.env.MERCADOPAGO_BACK_URL, // URL do frontend para onde o MP redireciona após o checkout
+  stripe: {
+    secretKey: process.env.STRIPE_SECRET_KEY,
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    checkoutSuccessUrl: process.env.STRIPE_CHECKOUT_SUCCESS_URL,
+    checkoutCancelUrl: process.env.STRIPE_CHECKOUT_CANCEL_URL,
   },
   rateLimit: {
     ttl: parseInt(process.env.RATE_LIMIT_TTL ?? '60', 10),

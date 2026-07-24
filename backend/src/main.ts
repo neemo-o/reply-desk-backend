@@ -6,7 +6,10 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create(AppModule, {
+    bufferLogs: true,
+    rawBody: true, // 🔒 Stripe webhook precisa do raw body para validar a assinatura
+  });
 
   app.useLogger(app.get(Logger));
 

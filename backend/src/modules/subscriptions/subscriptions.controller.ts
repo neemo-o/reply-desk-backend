@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Post, UseGuards } from '@nestjs/common';
 import { SubscriptionsService } from './subscriptions.service';
 import { CreateCheckoutDto } from './dto/create-checkout.dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
@@ -16,10 +16,25 @@ export class SubscriptionsController {
     return this.subscriptionsService.getCurrent(tenantId);
   }
 
-  // Só owner/admin podem contratar/trocar de plano.
+  /**
+   * Cria uma sessão de checkout no Stripe.
+   * billingType "recurring" (padrão): assinatura mensal automática com cartão
+   * billingType "one_time": pagamento único (cartão ou Pix, 1 mês de acesso)
+   */
   @Roles('owner', 'admin')
   @Post('checkout')
   createCheckout(@CurrentTenant() tenantId: string, @Body() dto: CreateCheckoutDto) {
-    return this.subscriptionsService.createCheckout(tenantId, dto.planId);
+    return this.subscriptionsService.createCheckout(tenantId, dto.planId, dto.billingType ?? 'recurring');
+  }
+
+  /**
+   * Cancela a assinatura ativa do tenant.
+   * Para recorrente: cancela no Stripe (para de cobrar).
+   * Para pagamento único: marca como cancelled.
+   */
+  @Roles('owner', 'admin')
+  @Delete('cancel')
+  cancel(@CurrentTenant() tenantId: string) {
+    return this.subscriptionsService.cancelSubscription(tenantId);
   }
 }
