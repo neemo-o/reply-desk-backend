@@ -8,9 +8,12 @@ export const apiClient = axios.create({
 });
 
 apiClient.interceptors.request.use((config) => {
-  const { accessToken } = useAuthStore.getState();
+  const { accessToken, tenantId } = useAuthStore.getState();
   if (accessToken) {
     config.headers.Authorization = `Bearer ${accessToken}`;
+  }
+  if (tenantId) {
+    config.headers["x-tenant-id"] = tenantId;
   }
   return config;
 });

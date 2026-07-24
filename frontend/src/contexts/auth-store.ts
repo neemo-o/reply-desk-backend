@@ -6,8 +6,10 @@ interface AuthState {
   user: User | null;
   accessToken: string | null;
   refreshToken: string | null;
+  tenantId: string | null;
   setSession: (tokens: AuthTokens, user?: User | null) => void;
   setUser: (user: User | null) => void;
+  setTenantId: (tenantId: string | null) => void;
   clearSession: () => void;
 }
 
@@ -22,6 +24,7 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       accessToken: null,
       refreshToken: null,
+      tenantId: null,
       setSession: (tokens, user) =>
         set((state) => ({
           accessToken: tokens.accessToken,
@@ -29,7 +32,8 @@ export const useAuthStore = create<AuthState>()(
           user: user !== undefined ? user : state.user,
         })),
       setUser: (user) => set({ user }),
-      clearSession: () => set({ user: null, accessToken: null, refreshToken: null }),
+      setTenantId: (tenantId) => set({ tenantId }),
+      clearSession: () => set({ user: null, accessToken: null, refreshToken: null, tenantId: null }),
     }),
     {
       name: "replydesk-auth",
@@ -37,6 +41,7 @@ export const useAuthStore = create<AuthState>()(
         user: state.user,
         accessToken: state.accessToken,
         refreshToken: state.refreshToken,
+        tenantId: state.tenantId,
       }),
     },
   ),

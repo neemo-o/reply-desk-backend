@@ -2,27 +2,47 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { toast } from "sonner";
 import { useAuthStore } from "./auth-store";
 import { authService } from "@/services/auth-service";
-import type { LoginPayload, RegisterPayload, User } from "@/types/auth";
+import type { LoginPayload, MeTenant, RegisterPayload, TenantRole, User } from "@/types/auth";
 
 interface AuthContextValue {
   user: User | null;
+  /** Tenant ativo do usuário (hoje só existe um por usuário). */
+  tenant: MeTenant | null;
+  /** Papel do usuário no tenant ativo — usado para liberar telas de owner. */
+  role: TenantRole | null;
   isAuthenticated: boolean;
   isInitializing: boolean;
   login: (payload: LoginPayload) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
+  /** Reconsulta /auth/me e atualiza user + tenant no contexto e na store. */
   refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { user, accessToken, refreshToken, setSession, setUser, clearSession } = useAuthStore();
+  const { accessToken, refreshToken, setSession, setUser, setTenantId, clearSession } = useAuthStore();
+  const [user, setLocalUser] = useState<User | null>(null);
+  const [tenant, setTenant] = useState<MeTenant | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
 
-  // 🔄 Ao carregar a app, valida a sessão persistida buscando o usuário atual.
-  // Se o access token estiver expirado, o interceptor do axios tenta o
-  // refresh automaticamente; se falhar de vez, a sessão é limpa (logout).
+  function applySnapshot(snapshot: Awaited<ReturnType<typeof authService.meSnapshot>>) {
+    const nextUser: User = {
+      id: snapshot.user.id,
+      name: snapshot.user.name,
+      email: snapshot.user.email,
+      emailVerified: snapshot.user.emailVerified,
+    };
+    // Regra de negócio atual do backend: no máximo 1 tenant por usuário.
+    const activeTenant = snapshot.tenants[0] ?? null;
+
+    setLocalUser(nextUser);
+    setUser(nextUser);
+    setTenant(activeTenant);
+    setTenantId(activeTenant?.id ?? null);
+  }
+
   useEffect(() => {
     async function bootstrap() {
       if (!accessToken) {
@@ -30,8 +50,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const currentUser = await authService.me();
-        setUser(currentUser);
+        const snapshot = await authService.meSnapshot();
+        applySnapshot(snapshot);
       } catch {
         clearSession();
       } finally {
@@ -45,15 +65,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function login(payload: LoginPayload) {
     const tokens = await authService.login(payload);
     setSession(tokens);
-    const currentUser = await authService.me();
-    setUser(currentUser);
+    const snapshot = await authService.meSnapshot();
+    applySnapshot(snapshot);
   }
 
   async function register(payload: RegisterPayload) {
     const tokens = await authService.register(payload);
     setSession(tokens);
-    const currentUser = await authService.me();
-    setUser(currentUser);
+    const snapshot = await authService.meSnapshot();
+    applySnapshot(snapshot);
   }
 
   async function logout() {
@@ -65,21 +85,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // mesmo se a chamada falhar, limpamos a sessão local
     } finally {
       clearSession();
+      setLocalUser(null);
+      setTenant(null);
       toast.success("Sessão encerrada");
     }
   }
 
-  // Usado após verificar o e-mail (ou qualquer mudança de estado do usuário no
-  // backend) para atualizar `user` no contexto sem precisar de novo login.
+  // Usado após verificar e-mail, concluir pagamento, editar perfil etc. — para
+  // atualizar user/tenant/assinatura no contexto sem precisar de novo login.
   async function refreshUser() {
-    const currentUser = await authService.me();
-    setUser(currentUser);
+    const snapshot = await authService.meSnapshot();
+    applySnapshot(snapshot);
   }
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        tenant,
+        role: tenant?.role ?? null,
         isAuthenticated: Boolean(accessToken && user),
         isInitializing,
         login,

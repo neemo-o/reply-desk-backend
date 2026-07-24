@@ -1,5 +1,5 @@
 import { apiClient, API_URL } from "./api-client";
-import type { AuthTokens, LoginPayload, RegisterPayload, User } from "@/types/auth";
+import type { AuthTokens, LoginPayload, MeSnapshot, RegisterPayload } from "@/types/auth";
 
 export const authService = {
   async login(payload: LoginPayload): Promise<AuthTokens> {
@@ -16,8 +16,13 @@ export const authService = {
     await apiClient.post("/auth/logout", { refreshToken });
   },
 
-  async me(): Promise<User> {
-    const { data } = await apiClient.get<User>("/users/me");
+  /**
+   * Snapshot de /auth/me: não exige header x-tenant-id (ao contrário de
+   * /users/me), então é seguro chamar logo após login/registro, antes de
+   * sabermos qual tenant está ativo. Traz emailVerified + tenants + assinatura.
+   */
+  async meSnapshot(): Promise<MeSnapshot> {
+    const { data } = await apiClient.get<MeSnapshot>("/auth/me");
     return data;
   },
 

@@ -58,14 +58,16 @@ class EnvironmentVariables {
   @IsString()
   STRIPE_WEBHOOK_SECRET?: string;
 
+  // 🔒 Em produção: obrigatório HTTPS. Em dev: aceita HTTP (ex.: localhost:5173 com Vite).
+  // O fail-closed de produção (bloco abaixo) valida HTTPS separadamente.
   @IsOptional()
   @IsString()
-  @Matches(/^https:\/\//, { message: 'STRIPE_CHECKOUT_SUCCESS_URL deve ser HTTPS' })
+  @Matches(/^https?:\/\//, { message: 'STRIPE_CHECKOUT_SUCCESS_URL deve começar com http:// ou https://' })
   STRIPE_CHECKOUT_SUCCESS_URL?: string;
 
   @IsOptional()
   @IsString()
-  @Matches(/^https:\/\//, { message: 'STRIPE_CHECKOUT_CANCEL_URL deve ser HTTPS' })
+  @Matches(/^https?:\/\//, { message: 'STRIPE_CHECKOUT_CANCEL_URL deve começar com http:// ou https://' })
   STRIPE_CHECKOUT_CANCEL_URL?: string;
 
   // 🔒 SMTP — envio do OTP de verificação de e-mail
@@ -125,6 +127,13 @@ export function validate(config: Record<string, unknown>) {
     }
     if (!validatedConfig.STRIPE_CHECKOUT_SUCCESS_URL || !validatedConfig.STRIPE_CHECKOUT_CANCEL_URL) {
       throw new Error('STRIPE_CHECKOUT_SUCCESS_URL e STRIPE_CHECKOUT_CANCEL_URL são obrigatórios em produção.');
+    }
+    // 🔒 Em produção, as URLs de checkout DEVEM ser HTTPS (não http://).
+    if (!validatedConfig.STRIPE_CHECKOUT_SUCCESS_URL.startsWith('https://')) {
+      throw new Error('STRIPE_CHECKOUT_SUCCESS_URL deve ser HTTPS em produção.');
+    }
+    if (!validatedConfig.STRIPE_CHECKOUT_CANCEL_URL.startsWith('https://')) {
+      throw new Error('STRIPE_CHECKOUT_CANCEL_URL deve ser HTTPS em produção.');
     }
     if (!validatedConfig.SMTP_HOST || !validatedConfig.SMTP_USER || !validatedConfig.SMTP_PASS) {
       throw new Error('SMTP_HOST, SMTP_USER e SMTP_PASS são obrigatórios em produção (envio de OTP).');

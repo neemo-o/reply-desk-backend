@@ -90,11 +90,16 @@ export class SubscriptionsService {
       throw new ForbiddenException('Confirme seu e-mail antes de contratar um plano');
     }
 
-    const successUrl = this.config.get<string>('stripe.checkoutSuccessUrl');
-    const cancelUrl = this.config.get<string>('stripe.checkoutCancelUrl');
-    if (!successUrl || !cancelUrl) {
+    const baseSuccessUrl = this.config.get<string>('stripe.checkoutSuccessUrl');
+    const baseCancelUrl = this.config.get<string>('stripe.checkoutCancelUrl');
+    if (!baseSuccessUrl || !baseCancelUrl) {
       throw new BadRequestException('STRIPE_CHECKOUT_SUCCESS_URL/CANCEL_URL não configuradas');
     }
+
+    // 🔒 Frontend precisa distinguir retorno de sucesso vs. cancelamento na mesma
+    // rota de callback — anexamos query params (session_id via template do Stripe).
+    const successUrl = `${baseSuccessUrl}${baseSuccessUrl.includes('?') ? '&' : '?'}checkout=success&session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${baseCancelUrl}${baseCancelUrl.includes('?') ? '&' : '?'}checkout=cancelled`;
 
     // 🔒 Advisory lock por tenant — serializa o checkout, elimina race condition
     return this.prisma.$transaction(async (tx) => {
