@@ -5,7 +5,6 @@ import { ContactsService } from './contacts.service';
 import { CreateContactDto } from './dto/create-contact.dto';
 import { UpdateContactDto } from './dto/update-contact.dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
-import { SubscriptionGuard } from '../../common/guards/subscription.guard';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { isUuid } from '../../common/utils/security';
 
@@ -22,7 +21,8 @@ class ListContactsQuery {
   take?: number;
 }
 
-@UseGuards(TenantGuard, SubscriptionGuard)
+// 🔒 M6 — SubscriptionGuard agora é global (APP_GUARD em AppModule).
+@UseGuards(TenantGuard)
 @Controller('contacts')
 export class ContactsController {
   constructor(private readonly contactsService: ContactsService) {}

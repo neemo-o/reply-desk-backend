@@ -3,6 +3,7 @@ import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { MailService } from '../../common/mail/mail.service';
+import { TenantsService } from '../tenants/tenants.service';
 
 const CODE_TTL_SECONDS = 10 * 60; // 10 minutos
 const RESEND_COOLDOWN_SECONDS = 60; // 1 minuto entre reenvios
@@ -42,6 +43,7 @@ export class EmailVerificationService {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly mail: MailService,
+    private readonly tenantsService: TenantsService,
   ) {}
 
   async sendInitialCode(userId: string, email: string): Promise<void> {
@@ -118,6 +120,12 @@ export class EmailVerificationService {
 
     await Promise.all([this.redis.del(codeKey(userId)), this.redis.del(attemptsKey(userId))]);
     await this.prisma.user.update({ where: { id: userId }, data: { emailVerified: true } });
+
+    // 🔒 M1 — Cria tenant automático após verificação de email.
+    // Antes o usuário verificava email e ficava sem tenant, precisando criar
+    // manualmente via POST /tenants. Agora criamos o tenant inicial automaticamente.
+    // Se já tem tenant (edge case: re-verificação), ignoramos.
+    await this.ensureTenantForUser(userId);
   }
 
   /**
@@ -131,6 +139,51 @@ export class EmailVerificationService {
     } catch {
       this.logger.error('Redis indisponível — fluxo de verificação de email não pode continuar');
       throw new ServiceUnavailableException('Serviço temporariamente indisponível — tente novamente em instantes');
+    }
+  }
+
+  /**
+   * 🔒 M1 — Garante que o usuário tem pelo menos um tenant após verificar email.
+   * Cria um tenant com slug derivado do nome do usuário + uuid curto.
+   * Idempotente: se o usuário já tem tenant, não cria outro.
+   */
+  private async ensureTenantForUser(userId: string): Promise<void> {
+    try {
+      const existingTenants = await this.prisma.tenantUser.findMany({
+        where: { userId },
+        select: { id: true },
+        take: 1,
+      });
+      if (existingTenants.length > 0) return;
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { name: true, email: true },
+      });
+      if (!user) return;
+
+      // Deriva o nome do tenant do nome do usuário (ex: "João Silva" → "João Silva")
+      const tenantName = `${user.name}'s Workspace`;
+      const slugBase = user.name
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      const uniqueSuffix = userId.slice(0, 8);
+      const slug = `${slugBase || 'workspace'}-${uniqueSuffix}`;
+
+      await this.tenantsService.create(userId, {
+        name: tenantName,
+        slug,
+        timezone: 'America/Sao_Paulo',
+      });
+
+      this.logger.log(`Tenant auto-criado para usuário ${userId} (${user.email})`);
+    } catch (err) {
+      // Erro ao criar tenant não deve falhar a verificação de email.
+      // O usuário pode criar via POST /tenants depois.
+      this.logger.error(`Falha ao auto-criar tenant para usuário ${userId}: ${(err as Error).message}`);
     }
   }
 

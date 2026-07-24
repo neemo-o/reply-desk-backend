@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StripeService } from './stripe.service';
+import { PlanLimitsService } from './plan-limits.service';
 import type Stripe from 'stripe';
 
 interface SubscriptionLike {
@@ -32,6 +33,7 @@ export class SubscriptionsService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly stripe: StripeService,
+    private readonly planLimits: PlanLimitsService,
   ) {}
 
   /**
@@ -250,6 +252,15 @@ export class SubscriptionsService {
       throw new BadRequestException('Você já está neste plano');
     }
 
+    // 🔒 M8 — Se for downgrade (novo plano mais barato), verifica se os recursos
+    // ativos excedem os limites do novo plano. Bloqueia se exceder.
+    const currentPlan = await this.prisma.plan.findUnique({
+      where: { id: subscription.planId },
+    });
+    if (currentPlan && newPlan.price < currentPlan.price) {
+      await this.planLimits.assertCanDowngrade(tenantId, newPlanId);
+    }
+
     // Atualiza no Stripe com prorratação
     const updatedSub = await this.stripe.updateSubscriptionPlan(
       subscription.externalId,
@@ -307,6 +318,10 @@ export class SubscriptionsService {
     switch (eventType) {
       case 'checkout.session.completed': {
         await this.handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
+        break;
+      }
+      case 'invoice.payment_failed': {
+        await this.handleInvoicePaymentFailed(event.data.object as Stripe.Invoice);
         break;
       }
       case 'customer.subscription.updated':
@@ -484,6 +499,66 @@ export class SubscriptionsService {
       where: { id: subscription.id },
       data: updateData as any,
     });
+  }
+
+  /**
+   * 🔒 M9 — Quando oStripe não consegue cobrar a fatura recorrente.
+   *
+   * O Stripe envia invoice.payment_failed quando a cobrança automática mensal
+   * falha (cartão expirado, saldo insuficiente, etc). A subscription entra
+   * em "past_due" no Stripe, mas nosso webhook customer.subscription.updated
+   * pode demorar para chegar. Marcamos como past_due imediatamente aqui
+   * para bloquear o tenant o quanto antes (SubscriptionGuard verifica isActive).
+   *
+   * Nota: o Stripe tenta cobrar até 4 vezes em 4 dias antes de cancelar
+   * definitivamente a subscription. Durante esse período, o tenant fica
+   * bloqueado mas não cancelado — o usuário pode atualizar o cartão e retomar.
+   */
+  private async handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
+    // Busca a subscription local pelo subscription ID do Stripe
+    const stripeSubId = invoice.subscription as string | null;
+    if (!stripeSubId) {
+      this.logger.warn('invoice.payment_failed sem subscription ID');
+      return;
+    }
+
+    let subscription = await this.prisma.subscription.findUnique({
+      where: { externalId: stripeSubId },
+    });
+
+    // Fallback: busca por tenantId no metadata da invoice
+    if (!subscription) {
+      const tenantId = (invoice.metadata?.tenantId as string | undefined) ??
+        (invoice.subscription_details?.metadata?.tenantId as string | undefined);
+      if (tenantId) {
+        subscription = await this.prisma.subscription.findFirst({
+          where: { tenantId, status: { in: ['active', 'trialing', 'past_due'] } },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
+    }
+
+    if (!subscription) {
+      this.logger.warn(`Nenhuma subscription local para Stripe invoice ${invoice.id}`);
+      return;
+    }
+
+    // Marca como past_due imediatamente — SubscriptionGuard bloqueia o acesso
+    await this.prisma.subscription.update({
+      where: { id: subscription.id },
+      data: {
+        status: 'past_due',
+        // Sincroniza externalId se encontrou via fallback
+        ...(subscription.externalId !== stripeSubId && { externalId: stripeSubId }),
+        lastPaymentId: invoice.id,
+      },
+    });
+
+    this.logger.warn(
+      `Pagamento falhou para tenant ${subscription.tenantId} — ` +
+      `subscription ${subscription.id} marcada como past_due ` +
+      `(invoice ${invoice.id}, tentativa ${invoice.attempt_count})`,
+    );
   }
 
   private mapStripeStatus(stripeStatus: string): string {

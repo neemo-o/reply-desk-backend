@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { PlanLimitsService } from '../subscriptions/plan-limits.service';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { InviteUserDto } from './dto/invite-user.dto';
 
@@ -11,7 +12,10 @@ const DEFAULT_ROLES = [
 
 @Injectable()
 export class TenantsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly planLimits: PlanLimitsService,
+  ) {}
 
   /**
    * DB-4 — Slug race condition eliminada: catch P2002 em vez de findUnique+create.
@@ -65,6 +69,9 @@ export class TenantsService {
   }
 
   async inviteUser(tenantId: string, dto: InviteUserDto) {
+    // 🔒 M7 — Verifica limite de usuários do plano antes de convidar
+    await this.planLimits.assertCanInviteUser(tenantId);
+
     const role = await this.prisma.role.findFirst({
       where: { tenantId, name: dto.roleName },
       select: { id: true },

@@ -6,7 +6,14 @@ import { TenantGuard } from '../../common/guards/tenant.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
+import { SkipSubscription } from '../../common/decorators/skip-subscription.decorator';
 
+/**
+ * 🔒 M6 — @SkipSubscription(): gerir a própria assinatura não requer assinatura
+ * ativa. O usuário precisa criar checkout/upgrade/cancel MESMO com assinatura
+ * expirada — senão não consegue regularizar pagamento.
+ */
+@SkipSubscription()
 @UseGuards(TenantGuard, RolesGuard)
 @Controller('subscriptions')
 export class SubscriptionsController {

@@ -1,14 +1,20 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { PlanLimitsService } from '../subscriptions/plan-limits.service';
 import { CreateBotDto } from './dto/create-bot.dto';
 import { CreateBotRuleDto } from './dto/create-bot-rule.dto';
 import { isUuid } from '../../common/utils/security';
 
 @Injectable()
 export class BotsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly planLimits: PlanLimitsService,
+  ) {}
 
+  // 🔒 M7 — Verifica limite de bots do plano antes de criar.
   async create(tenantId: string, dto: CreateBotDto) {
+    await this.planLimits.assertCanCreateBot(tenantId);
     return this.prisma.$transaction(async (tx) => {
       const bot = await tx.bot.create({ data: { tenantId, ...dto } });
       await tx.botVersion.create({ data: { botId: bot.id, version: 1 } });

@@ -1,17 +1,23 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { PlanLimitsService } from '../subscriptions/plan-limits.service';
 import { isUuid } from '../../common/utils/security';
 import { CreateSessionDto } from './dto/create-session.dto';
 
 @Injectable()
 export class WhatsappSessionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly planLimits: PlanLimitsService,
+  ) {}
 
   /**
    * ⚡ P-NORM — Cria sessão para tenantId. Persiste e devolve select enxuto.
    * Enfileiramento da connection real acontece no controller (BullMQ).
+   * 🔒 M7 — Verifica limite de sessions do plano antes de criar.
    */
   async create(tenantId: string, dto: CreateSessionDto) {
+    await this.planLimits.assertCanCreateSession(tenantId);
     // sessionName já era gerado como `${tenantId}-${uuid}`. Aqui mantemos.
     const sessionName = `${tenantId}-${Date.now().toString(36)}`;
     const session = await this.prisma.whatsappSession.create({

@@ -8,9 +8,10 @@ import { EmailVerificationService } from './email-verification.service';
 import { RefreshTokenCleanupJob } from './refresh-token-cleanup.job';
 import { UnverifiedUserCleanupJob } from './unverified-user-cleanup.job';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { TenantsModule } from '../tenants/tenants.module';
 
 @Module({
-  imports: [PassportModule, JwtModule.register({})],
+  imports: [PassportModule, JwtModule.register({}), TenantsModule],
   controllers: [AuthController],
   providers: [AuthService, TokensService, EmailVerificationService, JwtStrategy, RefreshTokenCleanupJob, UnverifiedUserCleanupJob],
 })

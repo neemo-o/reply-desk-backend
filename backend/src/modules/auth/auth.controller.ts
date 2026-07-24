@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
@@ -14,13 +15,20 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { SkipSubscription } from '../../common/decorators/skip-subscription.decorator';
 
 /**
  * 🔒 S8 — Rate-limit dedicado por IP para endpoints /auth.
  *
  * ThrottlerGuard global (100/60s) já está ativo. Aqui apertamos para mitigar
  * credential stuffing / account enumeration em /auth/login e /auth/register.
+ *
+ * 🔒 M6 — Todo o AuthController é @SkipSubscription() porque:
+ * - login/register/refresh/logout são @Public() (não passam por Jwt/Subscription)
+ * - verify-email/resend precisam funcionar ANTES do usuário ter assinatura
+ * - /auth/me é snapshot do estado do usuário (pode não ter tenant ainda)
  */
+@SkipSubscription()
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -65,6 +73,12 @@ export class AuthController {
   @Post('verify-email')
   verifyEmail(@CurrentUser('sub') userId: string, @Body() dto: VerifyEmailDto) {
     return this.emailVerificationService.verify(userId, dto.code);
+  }
+
+  // 🔒 M5 — Snapshot do estado do usuário (email verificado?, tem tenant?, subscription ativa?)
+  @Get('me')
+  me(@CurrentUser('sub') userId: string) {
+    return this.authService.getMeSnapshot(userId);
   }
 
   @Throttle({ default: { limit: 5, ttl: 60_000 } })

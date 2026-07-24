@@ -145,6 +145,75 @@ export class AuthService {
     return { success: true };
   }
 
+  /**
+   * 🔒 M5 — Snapshot do estado do usuário para o frontend decidir qual
+   * tela renderizar (verify-email, create-tenant, choose-plan, dashboard
+   * bloqueado, dashboard ativo).
+   */
+  async getMeSnapshot(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        emailVerified: true,
+      },
+    });
+    if (!user) throw new UnauthorizedException('Usuário não encontrado');
+
+    // Busca os tenants do usuário (com a subscription ativa mais recente)
+    const tenantUsers = await this.prisma.tenantUser.findMany({
+      where: { userId, status: 'active' },
+      include: {
+        tenant: {
+          include: {
+            subscriptions: {
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              include: { plan: true },
+            },
+          },
+        },
+      },
+    });
+
+    const tenants = tenantUsers.map((tu) => {
+      const sub = tu.tenant.subscriptions[0];
+      const now = new Date();
+      const isActive =
+        !!sub &&
+        ((sub.status === 'trialing' && (!sub.trialUntil || sub.trialUntil > now)) ||
+          (sub.status === 'active' && (!sub.expiresAt || sub.expiresAt > now)));
+
+      return {
+        id: tu.tenant.id,
+        name: tu.tenant.name,
+        slug: tu.tenant.slug,
+        role: tu.roleId,
+        subscription: sub
+          ? {
+              status: sub.status,
+              plan: sub.plan?.name,
+              isActive,
+              trialUntil: sub.trialUntil,
+              expiresAt: sub.expiresAt,
+            }
+          : null,
+      };
+    });
+
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        emailVerified: user.emailVerified,
+      },
+      tenants,
+    };
+  }
+
   private async issueTokens(userId: string, email: string) {
     const [accessToken, refreshToken] = await Promise.all([
       this.tokensService.generateAccessToken(userId, email),
