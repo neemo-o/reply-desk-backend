@@ -28,7 +28,7 @@ export class StripeWebhookController {
 
   @Public()
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 100, ttl: 60_000 } })
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post()
   async handle(
     @Req() req: Request & { rawBody: Buffer },

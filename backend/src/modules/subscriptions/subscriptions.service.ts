@@ -99,8 +99,8 @@ export class SubscriptionsService {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${tenantId}))`;
 
       const rows = await tx.$queryRaw<
-        Array<{ id: string; status: string; external_id: string | null; plan_id: string; billing_type: string }>
-      >`SELECT id, status, external_id, plan_id, billing_type FROM subscriptions WHERE tenant_id = ${tenantId} ORDER BY created_at DESC LIMIT 1`;
+        Array<{ id: string; status: string; external_id: string | null; plan_id: string; billing_type: string; trial_until: Date | null; expires_at: Date | null }>
+      >`SELECT id, status, external_id, plan_id, billing_type, trial_until, expires_at FROM subscriptions WHERE tenant_id = ${tenantId} ORDER BY created_at DESC LIMIT 1`;
 
       const current = rows[0]
         ? {
@@ -109,11 +109,13 @@ export class SubscriptionsService {
             externalId: rows[0].external_id,
             planId: rows[0].plan_id,
             billingType: rows[0].billing_type,
+            trialUntil: rows[0].trial_until,
+            expiresAt: rows[0].expires_at,
           }
         : null;
 
       // Bloqueia se já tem assinatura ativa válida
-      if (current && this.isActive({ status: current.status, trialUntil: null, expiresAt: null }) && current.status === 'active') {
+      if (current && this.isActive({ status: current.status, trialUntil: current.trialUntil, expiresAt: current.expiresAt }) && current.status === 'active') {
         throw new ConflictException('Este tenant já possui uma assinatura ativa');
       }
 
@@ -175,12 +177,19 @@ export class SubscriptionsService {
 
     // Se for recorrente, cancela no Stripe
     if (subscription.billingType === 'recurring' && subscription.externalId) {
-      // externalId pode ser o session ID ou subscription ID do Stripe
-      // Tenta buscar a subscription do Stripe via session
+      // Após o webhook checkout.session.completed, o externalId é sobrescrito
+      // de cs_... (session ID) para sub_... (subscription ID do Stripe).
+      // Detectar qual é para usar a API correta.
       try {
-        const session = await this.stripe.client.checkout.sessions.retrieve(subscription.externalId);
-        if (session.subscription) {
-          await this.stripe.cancelSubscription(session.subscription as string);
+        if (subscription.externalId.startsWith('sub_')) {
+          // Já é o subscription ID do Stripe — cancela diretamente
+          await this.stripe.cancelSubscription(subscription.externalId);
+        } else {
+          // Ainda é session ID (webhook ainda não processou) — busca a subscription via session
+          const session = await this.stripe.client.checkout.sessions.retrieve(subscription.externalId);
+          if (session.subscription) {
+            await this.stripe.cancelSubscription(session.subscription as string);
+          }
         }
       } catch (err) {
         this.logger.warn(`Erro ao cancelar no Stripe: ${(err as Error).message}`);
@@ -200,6 +209,13 @@ export class SubscriptionsService {
    * 🔒 Processa webhooks do Stripe com validação de assinatura e idempotência.
    */
   async handleWebhookEvent(event: Stripe.Event) {
+    // 🔒 Rejeita eventos de teste em produção — evita que webhooks de sandbox
+    // ativem assinaturas reais sem pagamento
+    if (process.env.NODE_ENV === 'production' && event.livemode === false) {
+      this.logger.warn(`Evento de teste Stripe rejeitado em produção: ${event.id} (${event.type})`);
+      throw new ForbiddenException('Eventos de teste não são permitidos em produção');
+    }
+
     const eventId = event.id;
     const eventType = event.type;
 
@@ -247,10 +263,34 @@ export class SubscriptionsService {
       return;
     }
 
-    const subscription = await this.prisma.subscription.findFirst({
+    // Busca a subscription local pelo session ID (cs_test_...).
+    // Se o webhook customer.subscription.updated chegou ANTES (race condition),
+    // o externalId no DB já foi mudado para sub_... — nesse caso faz fallback
+    // buscando por tenantId + status ativo.
+    let subscription = await this.prisma.subscription.findFirst({
       where: { tenantId, externalId: session.id },
       orderBy: { createdAt: 'desc' },
     });
+
+    if (!subscription) {
+      // Fallback: subscription.updated já mudou o externalId para sub_...
+      // Usa o subscription ID do Stripe vindo na session para buscar diretamente.
+      const stripeSubId = session.subscription as string | null;
+      if (stripeSubId) {
+        subscription = await this.prisma.subscription.findFirst({
+          where: { tenantId, externalId: stripeSubId },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
+    }
+
+    if (!subscription) {
+      // Último fallback: busca qualquer subscription ativa do tenant
+      subscription = await this.prisma.subscription.findFirst({
+        where: { tenantId, status: { in: ['pending', 'active', 'trialing'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
 
     if (!subscription) {
       this.logger.warn(`Nenhuma subscription local para session ${session.id}`);
@@ -258,20 +298,30 @@ export class SubscriptionsService {
     }
 
     if (session.mode === 'subscription' && session.subscription) {
-      // Recorrente: atualiza externalId para o subscription ID do Stripe
+      // Recorrente: atualiza externalId para o subscription ID do Stripe.
+      // Em modo subscription, o Stripe NÃO usa payment_intent — usa latest_invoice.
+      // Buscamos a subscription do Stripe para pegar current_period_end e latest_invoice
+      // em vez de calcular manualmente oneMonthFromNow() que pode dessincronizar do Stripe.
       const stripeSubId = session.subscription as string;
+      const stripeSub = await this.stripe.getSubscription(stripeSubId);
+      const currentPeriodEnd = stripeSub.current_period_end
+        ? new Date(stripeSub.current_period_end * 1000)
+        : this.oneMonthFromNow();
+      const invoiceId = stripeSub.latest_invoice as string | null;
+
       await this.prisma.subscription.update({
         where: { id: subscription.id },
         data: {
           status: 'active',
           externalId: stripeSubId,
-          lastPaymentId: session.payment_intent as string,
+          lastPaymentId: invoiceId,
           startsAt: new Date(),
-          expiresAt: this.oneMonthFromNow(),
+          expiresAt: currentPeriodEnd,
         },
       });
     } else if (session.mode === 'payment') {
-      // Pagamento único: ativa por 1 mês
+      // Pagamento único: ativa por 1 mês.
+      // Em modo payment, payment_intent está disponível normalmente.
       await this.prisma.subscription.update({
         where: { id: subscription.id },
         data: {
@@ -287,11 +337,29 @@ export class SubscriptionsService {
   /**
    * Quando o Stripe atualiza/cancela uma assinatura recorrente.
    * Sincroniza o status do Stripe com o banco local.
+   *
+   * 🔒 P3: Se o webhook customer.subscription.updated chegar ANTES do
+   * checkout.session.completed (Stripe não garante ordem), o externalId no DB
+   * ainda é cs_... e não sub_... — findUnique por externalId retorna null.
+   * Faz fallback usando o tenantId do metadata da subscription do Stripe.
    */
   private async handleSubscriptionUpdate(stripeSubscription: Stripe.Subscription) {
-    const subscription = await this.prisma.subscription.findUnique({
+    // Busca direta pelo externalId (fluxo normal — checkout já processado)
+    let subscription = await this.prisma.subscription.findUnique({
       where: { externalId: stripeSubscription.id },
     });
+
+    // Fallback: se o checkout.session.completed ainda não rodou, externalId
+    // no DB ainda é o session ID. Usa o tenantId do metadata para encontrar.
+    if (!subscription) {
+      const tenantId = stripeSubscription.metadata?.tenantId;
+      if (tenantId) {
+        subscription = await this.prisma.subscription.findFirst({
+          where: { tenantId, status: { in: ['pending', 'active', 'trialing'] } },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
+    }
 
     if (!subscription) {
       this.logger.warn(`Nenhuma subscription local para Stripe sub ${stripeSubscription.id}`);
@@ -303,12 +371,37 @@ export class SubscriptionsService {
       ? new Date(stripeSubscription.current_period_end * 1000)
       : null;
 
+    // 🔒 P6: Se o Stripe envia status trialing, preserva trialUntil a partir
+    // do trial_end do Stripe em vez de fundir trialing → active sem trialUntil.
+    const trialEnd = stripeSubscription.trial_end
+      ? new Date(stripeSubscription.trial_end * 1000)
+      : null;
+
+    // Constrói o update dinamicamente — só sobrescreve expiresAt e trialUntil
+    // se o Stripe enviou valores reais, evitando dessincronizar o que o
+    // checkout.session.completed já setou corretamente.
+    const updateData: Record<string, unknown> = {
+      status,
+      // Se encontrou via fallback, sincroniza o externalId para o sub_ ID correto
+      ...(subscription.externalId !== stripeSubscription.id && {
+        externalId: stripeSubscription.id,
+      }),
+    };
+
+    if (currentPeriodEnd) {
+      updateData.expiresAt = currentPeriodEnd;
+    }
+
+    if (trialEnd) {
+      updateData.trialUntil = trialEnd;
+    } else if (stripeSubscription.status === 'canceled') {
+      // Limpa trialOnly quando a subscription é cancelada
+      updateData.trialUntil = null;
+    }
+
     await this.prisma.subscription.update({
       where: { id: subscription.id },
-      data: {
-        status,
-        expiresAt: currentPeriodEnd,
-      },
+      data: updateData as any,
     });
   }
 
