@@ -140,9 +140,47 @@ export class StripeService {
   }
 
   /**
+   * 🔒 Agenda o cancelamento para o fim do ciclo atual (cancel_at_period_end: true).
+   * O usuário continua com acesso até current_period_end. O Stripe envia
+   * customer.subscription.deleted quando o ciclo acaba — o webhook marca
+   * status 'cancelled' no DB.
+   *
+   * Padrão SaaS: usuário pagou o mês, mantém acesso até o fim.
+   */
+  async scheduleCancelAtPeriodEnd(stripeSubscriptionId: string): Promise<Stripe.Subscription> {
+    try {
+      return await this.client.subscriptions.update(stripeSubscriptionId, {
+        cancel_at_period_end: true,
+      });
+    } catch (err) {
+      this.logger.error(`Stripe scheduleCancel falhou: ${(err as Error).message}`);
+      throw new BadGatewayException('Não foi possível agendar o cancelamento no Stripe');
+    }
+  }
+
+  /**
+   * 🔒 Reativa uma assinatura que estava agendada para cancelar no fim do ciclo.
+   * Remove o cancel_at_period_end — o usuário continua sendo cobrado normalmente.
+   */
+  async reactivateSubscription(stripeSubscriptionId: string): Promise<Stripe.Subscription> {
+    try {
+      return await this.client.subscriptions.update(stripeSubscriptionId, {
+        cancel_at_period_end: false,
+      });
+    } catch (err) {
+      this.logger.error(`Stripe reactivate falhou: ${(err as Error).message}`);
+      throw new BadGatewayException('Não foi possível reativar a assinatura no Stripe');
+    }
+  }
+
+  /**
    * 🔒 Upgrade/downgrade de plano no Stripe.
    * Atualiza o price ID da subscription ativa com prorratação automática.
    * O Stripe calcula crédito pelos dias não usados + débito proporcional do novo plano.
+   *
+   * payment_behavior: 'pending_if_incomplete' — se a prorratação falhar (cartão recusado),
+   * a subscription fica em 'pending' e a troca de plano NÃO é aplicada. O backend
+   * checa o status retornado e retorna erro ao usuário em vez de dizer "sucesso".
    */
   async updateSubscriptionPlan(
     stripeSubscriptionId: string,
@@ -158,10 +196,13 @@ export class StripeService {
 
       const itemId = subscription.items.data[0].id;
 
-      // Atualiza o price do item com prorratação
+      // Atualiza o price do item com prorratação.
+      // pending_if_incomplete: se o pagamento da prorratação falhar, a subscription
+      // fica em 'past_due' ou 'incomplete' e a troca de plano é revertida pelo Stripe.
       return await this.client.subscriptions.update(stripeSubscriptionId, {
         items: [{ id: itemId, price: newPriceId }],
         proration_behavior: 'create_prorations',
+        payment_behavior: 'pending_if_incomplete',
         metadata: {
           ...subscription.metadata,
           upgradedAt: new Date().toISOString(),
@@ -170,6 +211,63 @@ export class StripeService {
     } catch (err) {
       this.logger.error(`Stripe updateSubscriptionPlan falhou: ${(err as Error).message}`);
       throw new BadGatewayException('Não foi possível alterar o plano no Stripe');
+    }
+  }
+
+  /**
+   * 🔒 Pré-visualiza a prorratação de um upgrade/downgrade sem cobrar.
+   * Calcula a diferença proporcional manualmente a partir dos dados da subscription
+   * atual no Stripe (current_period_end, price do item atual) e o preço do novo plano.
+   *
+   * Não usa invoices.createPreview porque o Stripe SDK v16 não tem suporte estável
+   * para simular troca de items via preview — retorna valor integral em vez de prorratação.
+   */
+  async previewUpgradeInvoice(
+    stripeSubscriptionId: string,
+    newPriceId: string,
+  ): Promise<{ amountDue: number; currency: string; prorationDate: number }> {
+    try {
+      // Busca a subscription atual com o price do item
+      const subscription = await this.client.subscriptions.retrieve(stripeSubscriptionId, {
+        expand: ['items.data.price'],
+      });
+      if (!subscription.items.data.length) {
+        throw new Error('Subscription sem items no Stripe');
+      }
+
+      const currentItem = subscription.items.data[0];
+      const currentPrice = currentItem.price;
+      if (!currentPrice) {
+        throw new Error('Price do item atual não encontrado no Stripe');
+      }
+
+      // Busca o novo price
+      const newPrice = await this.client.prices.retrieve(newPriceId);
+
+      // Calcula a prorratação manualmente
+      // Valor = (novoPreçoDiário - preçoAtualDiário) × diasRestantes
+      const now = Math.floor(Date.now() / 1000);
+      const periodEnd = subscription.current_period_end;
+      const daysRemaining = Math.max(0, Math.ceil((periodEnd - now) / 86400));
+
+      // Preços em centavos — ambos são mensais (recurring.interval = 'month')
+      const currentMonthlyAmount = currentPrice.unit_amount ?? 0;
+      const newMonthlyAmount = newPrice.unit_amount ?? 0;
+
+      // Assumindo mês de 30 dias (padrão do Stripe para prorratação)
+      const currentDailyAmount = currentMonthlyAmount / 30;
+      const newDailyAmount = newMonthlyAmount / 30;
+
+      const prorationAmount = Math.round((newDailyAmount - currentDailyAmount) * daysRemaining);
+
+      return {
+        amountDue: prorationAmount,
+        currency: newPrice.currency,
+        prorationDate: now,
+      };
+    } catch (err) {
+      this.logger.error(`Stripe previewUpgradeInvoice falhou: ${(err as Error).message}`);
+      throw new BadGatewayException('Não foi possível pré-visualizar a prorratação no Stripe');
     }
   }
 

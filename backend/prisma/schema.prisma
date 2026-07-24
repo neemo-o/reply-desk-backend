@@ -162,6 +162,10 @@ model Subscription {
   trialUntil    DateTime? @map("trial_until")
   startsAt      DateTime  @default(now()) @map("starts_at")
   expiresAt     DateTime? @map("expires_at")
+  // 🔒 Cancelamento no fim do ciclo (cancel_at_period_end do Stripe).
+  // true = usuário pediu cancelar, mas mantém acesso até expiresAt.
+  // Quando o webhook customer.subscription.deleted chega, vira false + status 'cancelled'.
+  cancelAtPeriodEnd Boolean @default(false) @map("cancel_at_period_end")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 

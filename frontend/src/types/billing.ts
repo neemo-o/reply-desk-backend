@@ -20,6 +20,7 @@ export interface Subscription {
   planId: string;
   status: SubscriptionStatus;
   billingType: BillingType;
+  cancelAtPeriodEnd: boolean;
   trialUntil?: string | null;
   startsAt: string;
   expiresAt?: string | null;
@@ -31,6 +32,14 @@ export interface CheckoutResult {
   checkoutUrl: string;
   subscriptionId: string;
   billingType: BillingType;
+}
+
+export interface UpgradePreview {
+  currentPlan: string | null;
+  newPlan: string;
+  amountDue: number;
+  currency: string;
+  isUpgrade: boolean;
 }
 
 export interface TenantMember {

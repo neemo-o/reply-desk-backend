@@ -177,13 +177,17 @@ export class SubscriptionsService {
         }
 
   /**
-   * Cancela a assinatura ativa do tenant.
-   * Para recorrente: cancela no Stripe (para de cobrar).
-   * Para pagamento único: apenas marca como cancelled no DB.
+   * 🔒 Cancela a assinatura ativa do tenant — agenda para o fim do ciclo.
+   *
+   * Padrão SaaS: usuário pagou o mês, mantém acesso até expiresAt.
+   * O Stripe envia customer.subscription.deleted quando o ciclo acaba —
+   * o webhook marca status 'cancelled' no DB.
+   *
+   * Para pagamento único (one_time): cancela imediatamente no DB.
    */
   async cancelSubscription(tenantId: string) {
     const subscription = await this.prisma.subscription.findFirst({
-      where: { tenantId, status: { in: ['active', 'past_due', 'pending'] } },
+      where: { tenantId, status: { in: ['active', 'past_due', 'pending', 'trialing'] } },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -191,34 +195,75 @@ export class SubscriptionsService {
       throw new NotFoundException('Nenhuma assinatura ativa encontrada');
     }
 
-    // Se for recorrente, cancela no Stripe
-    if (subscription.billingType === 'recurring' && subscription.externalId) {
-      // Após o webhook checkout.session.completed, o externalId é sobrescrito
-      // de cs_... (session ID) para sub_... (subscription ID do Stripe).
-      // Detectar qual é para usar a API correta.
+    // Pagamento único não tem ciclo recorrente no Stripe — cancela imediatamente.
+    if (subscription.billingType !== 'recurring') {
+      await this.prisma.subscription.update({
+        where: { id: subscription.id },
+        data: { status: 'cancelled', cancelAtPeriodEnd: false },
+      });
+      return { cancelled: true, scheduled: false, subscriptionId: subscription.id };
+    }
+
+    // Recorrente: se ainda não tem sub_ ID (webhook não processou), cancela via session.
+    let stripeSubId: string | null = null;
+    if (subscription.externalId?.startsWith('sub_')) {
+      stripeSubId = subscription.externalId;
+    } else if (subscription.externalId) {
       try {
-        if (subscription.externalId.startsWith('sub_')) {
-          // Já é o subscription ID do Stripe — cancela diretamente
-          await this.stripe.cancelSubscription(subscription.externalId);
-        } else {
-          // Ainda é session ID (webhook ainda não processou) — busca a subscription via session
-          const session = await this.stripe.client.checkout.sessions.retrieve(subscription.externalId);
-          if (session.subscription) {
-            await this.stripe.cancelSubscription(session.subscription as string);
-          }
-        }
+        const session = await this.stripe.client.checkout.sessions.retrieve(subscription.externalId);
+        stripeSubId = (session.subscription as string) ?? null;
       } catch (err) {
-        this.logger.warn(`Erro ao cancelar no Stripe: ${(err as Error).message}`);
-        // Continua e marca como cancelled no DB mesmo se Stripe falhar
+        this.logger.warn(`Erro ao buscar session para cancelar: ${(err as Error).message}`);
       }
     }
 
+    if (!stripeSubId) {
+      throw new BadRequestException('Assinatura ainda não foi ativada no Stripe — aguarde o processamento do pagamento');
+    }
+
+    // Agenda cancelamento no fim do ciclo — usuário mantém acesso até expiresAt.
+    try {
+      await this.stripe.scheduleCancelAtPeriodEnd(stripeSubId);
+    } catch (err) {
+      this.logger.warn(`Erro ao agendar cancelamento no Stripe: ${(err as Error).message}`);
+      throw new BadRequestException('Não foi possível agendar o cancelamento no Stripe');
+    }
+
+    // Marca a intenção no DB — status continua 'active' até o webhook deleted chegar.
     await this.prisma.subscription.update({
       where: { id: subscription.id },
-      data: { status: 'cancelled' },
+      data: { cancelAtPeriodEnd: true },
     });
 
-    return { cancelled: true, subscriptionId: subscription.id };
+    return { cancelled: true, scheduled: true, subscriptionId: subscription.id };
+  }
+
+  /**
+   * 🔒 Reativa uma assinatura que estava agendada para cancelar no fim do ciclo.
+   * Remove o cancel_at_period_end no Stripe e no DB.
+   */
+  async reactivateSubscription(tenantId: string) {
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { tenantId, cancelAtPeriodEnd: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!subscription) {
+      throw new NotFoundException('Nenhuma assinatura com cancelamento agendado encontrada');
+    }
+
+    if (subscription.billingType !== 'recurring' || !subscription.externalId?.startsWith('sub_')) {
+      throw new BadRequestException('Reativação só está disponível para assinaturas recorrentes ativas');
+    }
+
+    await this.stripe.reactivateSubscription(subscription.externalId);
+
+    await this.prisma.subscription.update({
+      where: { id: subscription.id },
+      data: { cancelAtPeriodEnd: false },
+    });
+
+    return { reactivated: true, subscriptionId: subscription.id };
   }
 
   /**
@@ -257,6 +302,14 @@ export class SubscriptionsService {
       throw new BadRequestException('Você já está neste plano');
     }
 
+    // 🔒 Se o tenant tem cancelamento agendado, bloqueia troca de plano.
+    // O usuário precisa reativar a assinatura antes de fazer upgrade/downgrade.
+    if (subscription.cancelAtPeriodEnd) {
+      throw new ConflictException(
+        'Você tem um cancelamento agendado. Reative a assinatura antes de trocar de plano.',
+      );
+    }
+
     // 🔒 M8 — Se for downgrade (novo plano mais barato), verifica se os recursos
     // ativos excedem os limites do novo plano. Bloqueia se exceder.
     const currentPlan = await this.prisma.plan.findUnique({
@@ -267,12 +320,35 @@ export class SubscriptionsService {
     }
 
     // Atualiza no Stripe com prorratação
+    // payment_behavior: 'pending_if_incomplete' faz o Stripe reter a troca
+    // se o pagamento da prorratação falhar (cartão recusado).
     const updatedSub = await this.stripe.updateSubscriptionPlan(
       subscription.externalId,
       newPlan.stripePriceRecurringId,
     );
 
-    // Atualiza no DB
+    // 🔒 Se a prorratação falhou (cartão recusado), o Stripe retorna status
+    // 'incomplete' ou 'past_due'. Não atualizamos o DB — o usuário continua
+    // no plano anterior.
+    if (updatedSub.status === 'incomplete' || updatedSub.status === 'past_due') {
+      const latestInvoice = updatedSub.latest_invoice;
+      let errorMessage = 'O pagamento da prorratação foi recusado. Verifique seu cartão e tente novamente.';
+      if (typeof latestInvoice === 'object' && latestInvoice !== null) {
+        const paymentIntent = (latestInvoice as Stripe.Invoice).payment_intent;
+        if (typeof paymentIntent === 'object' && paymentIntent !== null) {
+          const declineMessage = (paymentIntent as Stripe.PaymentIntent).last_payment_error?.message;
+          if (declineMessage) errorMessage = `Pagamento recusado: ${declineMessage}`;
+        }
+      }
+
+      throw new BadRequestException({
+        message: errorMessage,
+        code: 'PRORATION_PAYMENT_FAILED',
+        stripeStatus: updatedSub.status,
+      });
+    }
+
+    // Pagamento aceito — atualiza no DB
     const currentPeriodEnd = updatedSub.current_period_end
       ? new Date(updatedSub.current_period_end * 1000)
       : null;
@@ -290,6 +366,62 @@ export class SubscriptionsService {
       subscriptionId: subscription.id,
       newPlan: newPlan.name,
       newPrice: newPlan.price,
+    };
+  }
+
+  /**
+   * 🔒 Pré-visualiza o valor da prorratação de um upgrade/downgrade.
+   * Não cobra — só simula no Stripe e retorna o valor que seria cobrado.
+   */
+  async previewUpgrade(tenantId: string, newPlanId: string) {
+    const newPlan = await this.prisma.plan.findUnique({ where: { id: newPlanId } });
+    if (!newPlan) throw new NotFoundException('Plano não encontrado');
+    if (!newPlan.stripePriceRecurringId) {
+      throw new BadRequestException('Plano não configurado para pagamento recorrente');
+    }
+
+    // Busca a subscription ativa do tenant
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { tenantId, status: { in: ['active', 'trialing'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!subscription) {
+      throw new NotFoundException('Nenhuma assinatura ativa encontrada');
+    }
+    if (subscription.billingType !== 'recurring') {
+      throw new BadRequestException('Pré-visualização só está disponível para assinaturas recorrentes');
+    }
+    if (!subscription.externalId?.startsWith('sub_')) {
+      throw new BadRequestException('Assinatura ainda não foi ativada no Stripe');
+    }
+    if (subscription.planId === newPlanId) {
+      throw new BadRequestException('Você já está neste plano');
+    }
+    if (subscription.cancelAtPeriodEnd) {
+      throw new ConflictException(
+        'Você tem um cancelamento agendado. Reative a assinatura antes de trocar de plano.',
+      );
+    }
+
+    const currentPlan = await this.prisma.plan.findUnique({
+      where: { id: subscription.planId },
+    });
+
+    // Pede ao Stripe para simular a prorratação
+    const preview = await this.stripe.previewUpgradeInvoice(
+      subscription.externalId,
+      newPlan.stripePriceRecurringId,
+    );
+
+    // amountDue vem em centavos — converte para valor decimal
+    const amountDue = preview.amountDue / 100;
+
+    return {
+      currentPlan: currentPlan?.name ?? null,
+      newPlan: newPlan.name,
+      amountDue,
+      currency: preview.currency,
+      isUpgrade: currentPlan ? newPlan.price > currentPlan.price : true,
     };
   }
 
@@ -498,6 +630,17 @@ export class SubscriptionsService {
     } else if (stripeSubscription.status === 'canceled') {
       // Limpa trialOnly quando a subscription é cancelada
       updateData.trialUntil = null;
+    }
+
+    // 🔒 Sincroniza cancelAtPeriodEnd com o Stripe.
+    // - Quando cancel_at_period_end = true: usuário pediu cancelamento, mantém acesso até o fim.
+    // - Quando o webhook "deleted" chega (fim do ciclo): status 'canceled' + cancelAtPeriodEnd false.
+    // - Quando o usuário reativa via nossa API: cancel_at_period_end = false novamente.
+    if (stripeSubscription.status === 'canceled') {
+      // Fim do ciclo reached — marca como cancelled definitivo.
+      updateData.cancelAtPeriodEnd = false;
+    } else {
+      updateData.cancelAtPeriodEnd = Boolean(stripeSubscription.cancel_at_period_end);
     }
 
     await this.prisma.subscription.update({

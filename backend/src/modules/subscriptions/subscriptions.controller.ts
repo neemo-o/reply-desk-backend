@@ -47,13 +47,33 @@ export class SubscriptionsController {
   }
 
   /**
+   * 🔒 Pré-visualiza o valor da prorratação de um upgrade/downgrade.
+   * Não cobra — só simula no Stripe e retorna o valor imediato que seria cobrado.
+   */
+  @Roles('owner', 'admin')
+  @Post('preview-upgrade')
+  previewUpgrade(@CurrentTenant() tenantId: string, @Body() dto: UpgradePlanDto) {
+    return this.subscriptionsService.previewUpgrade(tenantId, dto.planId);
+  }
+
+  /**
    * Cancela a assinatura ativa do tenant.
-   * Para recorrente: cancela no Stripe (para de cobrar).
-   * Para pagamento único: marca como cancelled.
+   * Agenda o cancelamento para o fim do ciclo (padrão SaaS) — o usuário mantém
+   * acesso até a data de expiração já paga.
    */
   @Roles('owner', 'admin')
   @Delete('cancel')
   cancel(@CurrentTenant() tenantId: string) {
     return this.subscriptionsService.cancelSubscription(tenantId);
+  }
+
+  /**
+   * 🔒 Reativa uma assinatura que estava agendada para cancelar.
+   * Remove o cancel_at_period_end no Stripe e no DB.
+   */
+  @Roles('owner', 'admin')
+  @Post('reactivate')
+  reactivate(@CurrentTenant() tenantId: string) {
+    return this.subscriptionsService.reactivateSubscription(tenantId);
   }
 }

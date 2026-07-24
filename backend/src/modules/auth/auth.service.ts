@@ -166,6 +166,7 @@ export class AuthService {
     const tenantUsers = await this.prisma.tenantUser.findMany({
       where: { userId, status: 'active' },
       include: {
+        role: { select: { name: true } },
         tenant: {
           include: {
             subscriptions: {
@@ -190,7 +191,7 @@ export class AuthService {
         id: tu.tenant.id,
         name: tu.tenant.name,
         slug: tu.tenant.slug,
-        role: tu.roleId,
+        role: tu.role.name,
         subscription: sub
           ? {
               status: sub.status,
