@@ -43,6 +43,7 @@ export class StripeService {
     subscriptionId: string;
     successUrl: string;
     cancelUrl: string;
+    hasTrial?: boolean;
   }): Promise<{ checkoutUrl: string; sessionId: string }> {
     try {
       const session = await this.client.checkout.sessions.create({
@@ -55,6 +56,11 @@ export class StripeService {
             tenantId: input.tenantId,
             subscriptionId: input.subscriptionId,
           },
+          // 🔒 Trial de 7 dias apenas para Basic + novos usuários.
+          // O Stripe valida o cartão imediatamente (cobra $0) e só cobra
+          // de verdade após 7 dias. Se recusar na cobrança, a subscription
+          // vai para past_due → bloqueia o tenant.
+          ...(input.hasTrial && { trial_period_days: 7 }),
         },
         success_url: input.successUrl,
         cancel_url: input.cancelUrl,
@@ -130,6 +136,40 @@ export class StripeService {
     } catch (err) {
       this.logger.error(`Stripe cancelSubscription falhou: ${(err as Error).message}`);
       throw new BadGatewayException('Não foi possível cancelar a assinatura no Stripe');
+    }
+  }
+
+  /**
+   * 🔒 Upgrade/downgrade de plano no Stripe.
+   * Atualiza o price ID da subscription ativa com prorratação automática.
+   * O Stripe calcula crédito pelos dias não usados + débito proporcional do novo plano.
+   */
+  async updateSubscriptionPlan(
+    stripeSubscriptionId: string,
+    newPriceId: string,
+  ): Promise<Stripe.Subscription> {
+    try {
+      // Busca a subscription atual para pegar o item ID
+      const subscription = await this.client.subscriptions.retrieve(stripeSubscriptionId);
+
+      if (!subscription.items.data.length) {
+        throw new Error('Subscription sem items no Stripe');
+      }
+
+      const itemId = subscription.items.data[0].id;
+
+      // Atualiza o price do item com prorratação
+      return await this.client.subscriptions.update(stripeSubscriptionId, {
+        items: [{ id: itemId, price: newPriceId }],
+        proration_behavior: 'create_prorations',
+        metadata: {
+          ...subscription.metadata,
+          upgradedAt: new Date().toISOString(),
+        },
+      });
+    } catch (err) {
+      this.logger.error(`Stripe updateSubscriptionPlan falhou: ${(err as Error).message}`);
+      throw new BadGatewayException('Não foi possível alterar o plano no Stripe');
     }
   }
 

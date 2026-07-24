@@ -4,6 +4,7 @@ import { StripeService } from './stripe.service';
 import { SubscriptionsController } from './subscriptions.controller';
 import { PlansController } from './plans.controller';
 import { StripeWebhookController } from './webhooks/stripe-webhook.controller';
+import { BlockedTenantCleanupJob } from './blocked-tenant-cleanup.job';
 
 /**
  * @Global() para que SubscriptionGuard (usado via @UseGuards em outros módulos)
@@ -13,7 +14,7 @@ import { StripeWebhookController } from './webhooks/stripe-webhook.controller';
 @Global()
 @Module({
   controllers: [SubscriptionsController, PlansController, StripeWebhookController],
-  providers: [SubscriptionsService, StripeService],
+  providers: [SubscriptionsService, StripeService, BlockedTenantCleanupJob],
   exports: [SubscriptionsService],
 })
 export class SubscriptionsModule {}

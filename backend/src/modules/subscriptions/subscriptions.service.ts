@@ -114,13 +114,21 @@ export class SubscriptionsService {
           }
         : null;
 
-      // Bloqueia se já tem assinatura ativa válida
-      if (current && this.isActive({ status: current.status, trialUntil: current.trialUntil, expiresAt: current.expiresAt }) && current.status === 'active') {
+      // Bloqueia se já tem assinatura ativa ou em trial válida
+      if (current && this.isActive({ status: current.status, trialUntil: current.trialUntil, expiresAt: current.expiresAt }) && (current.status === 'active' || current.status === 'trialing')) {
         throw new ConflictException('Este tenant já possui uma assinatura ativa');
       }
 
       // Reusa subscription pending existente
       const subscriptionId = current && current.status === 'pending' ? current.id : randomUUID();
+
+      // 🔒 Trial de 7 dias apenas para o plano Basic E apenas para novos usuários.
+      // Considera "novo usuário" = nunca teve subscription ativa, trial, cancelada
+      // ou past_due. Subscription pending (checkout não completado) não conta.
+      const hadPreviousSubscription =
+        current !== null &&
+        current.status !== 'pending';
+      const hasTrial = plan.id === 'basic-plan' && !hadPreviousSubscription;
 
       const checkoutInput = {
         priceId,
@@ -129,6 +137,7 @@ export class SubscriptionsService {
         subscriptionId,
         successUrl,
         cancelUrl,
+        hasTrial,
       };
 
       let result: { checkoutUrl: string; sessionId: string };
@@ -203,6 +212,69 @@ export class SubscriptionsService {
     });
 
     return { cancelled: true, subscriptionId: subscription.id };
+  }
+
+  /**
+   * 🔒 Upgrade/downgrade de plano.
+   * Só funciona para subscriptions recorrentes ativas ou em trial.
+   * O Stripe faz a prorratação automaticamente (credita dias não usados,
+   * debita proporcional do novo plano).
+   */
+  async upgradePlan(tenantId: string, newPlanId: string) {
+    // Valida o novo plano
+    const newPlan = await this.prisma.plan.findUnique({ where: { id: newPlanId } });
+    if (!newPlan) throw new NotFoundException('Plano não encontrado');
+    if (!newPlan.stripePriceRecurringId) {
+      throw new BadRequestException('Novo plano não configurado no Stripe para pagamento recorrente');
+    }
+
+    // Busca a subscription ativa/trialing do tenant
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { tenantId, status: { in: ['active', 'trialing'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!subscription) {
+      throw new NotFoundException('Nenhuma assinatura ativa encontrada para upgrade');
+    }
+
+    if (subscription.billingType !== 'recurring') {
+      throw new BadRequestException('Upgrade só está disponível para assinaturas recorrentes');
+    }
+
+    if (!subscription.externalId || !subscription.externalId.startsWith('sub_')) {
+      throw new BadRequestException('Assinatura ainda não foi ativada no Stripe — aguarde o processamento do pagamento');
+    }
+
+    if (subscription.planId === newPlanId) {
+      throw new BadRequestException('Você já está neste plano');
+    }
+
+    // Atualiza no Stripe com prorratação
+    const updatedSub = await this.stripe.updateSubscriptionPlan(
+      subscription.externalId,
+      newPlan.stripePriceRecurringId,
+    );
+
+    // Atualiza no DB
+    const currentPeriodEnd = updatedSub.current_period_end
+      ? new Date(updatedSub.current_period_end * 1000)
+      : null;
+
+    await this.prisma.subscription.update({
+      where: { id: subscription.id },
+      data: {
+        planId: newPlan.id,
+        expiresAt: currentPeriodEnd,
+      },
+    });
+
+    return {
+      upgraded: true,
+      subscriptionId: subscription.id,
+      newPlan: newPlan.name,
+      newPrice: newPlan.price,
+    };
   }
 
   /**
@@ -309,14 +381,23 @@ export class SubscriptionsService {
         : this.oneMonthFromNow();
       const invoiceId = stripeSub.latest_invoice as string | null;
 
+      // 🔒 Trial: se o Stripe criou a subscription em trialing (trial_period_days=7),
+      // o status no Stripe é 'trialing' — mapeamos para 'trialing' no DB
+      // em vez de 'active' para o isActive verificar trialUntil.
+      const isTrialing = stripeSub.status === 'trialing';
+      const trialEnd = stripeSub.trial_end
+        ? new Date(stripeSub.trial_end * 1000)
+        : null;
+
       await this.prisma.subscription.update({
         where: { id: subscription.id },
         data: {
-          status: 'active',
+          status: isTrialing ? 'trialing' : 'active',
           externalId: stripeSubId,
           lastPaymentId: invoiceId,
           startsAt: new Date(),
           expiresAt: currentPeriodEnd,
+          trialUntil: trialEnd,
         },
       });
     } else if (session.mode === 'payment') {
@@ -408,8 +489,9 @@ export class SubscriptionsService {
   private mapStripeStatus(stripeStatus: string): string {
     switch (stripeStatus) {
       case 'active':
-      case 'trialing':
         return 'active';
+      case 'trialing':
+        return 'trialing';
       case 'past_due':
       case 'unpaid':
         return 'past_due';

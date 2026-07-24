@@ -1,6 +1,7 @@
-import { Body, Controller, Delete, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Patch, Post, UseGuards } from '@nestjs/common';
 import { SubscriptionsService } from './subscriptions.service';
 import { CreateCheckoutDto } from './dto/create-checkout.dto';
+import { UpgradePlanDto } from './dto/upgrade-plan.dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -25,6 +26,17 @@ export class SubscriptionsController {
   @Post('checkout')
   createCheckout(@CurrentTenant() tenantId: string, @Body() dto: CreateCheckoutDto) {
     return this.subscriptionsService.createCheckout(tenantId, dto.planId, dto.billingType ?? 'recurring');
+  }
+
+  /**
+   * Upgrade/downgrade de plano.
+   * Atualiza a subscription ativa no Stripe com prorratação automática.
+   * O Stripe credita dias não usados do plano anterior e debita o proporcional do novo.
+   */
+  @Roles('owner', 'admin')
+  @Patch('upgrade')
+  upgradePlan(@CurrentTenant() tenantId: string, @Body() dto: UpgradePlanDto) {
+    return this.subscriptionsService.upgradePlan(tenantId, dto.planId);
   }
 
   /**
