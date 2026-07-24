@@ -11,6 +11,7 @@ interface AuthContextValue {
   login: (payload: LoginPayload) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -68,6 +69,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // Usado após verificar o e-mail (ou qualquer mudança de estado do usuário no
+  // backend) para atualizar `user` no contexto sem precisar de novo login.
+  async function refreshUser() {
+    const currentUser = await authService.me();
+    setUser(currentUser);
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -77,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login,
         register,
         logout,
+        refreshUser,
       }}
     >
       {children}

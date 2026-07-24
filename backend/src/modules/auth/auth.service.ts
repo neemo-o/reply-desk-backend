@@ -6,6 +6,7 @@ import {
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { TokensService } from './tokens.service';
+import { EmailVerificationService } from './email-verification.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 
@@ -24,6 +25,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokensService: TokensService,
+    private readonly emailVerificationService: EmailVerificationService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -38,6 +40,10 @@ export class AuthService {
     const user = await this.prisma.user.create({
       data: { name: dto.name, email: dto.email, passwordHash },
     });
+
+    // Dispara o OTP em background — falha no envio não deve bloquear o cadastro
+    // (o usuário pode pedir reenvio na tela de verificação).
+    void this.emailVerificationService.sendInitialCode(user.id, user.email);
 
     return this.issueTokens(user.id, user.email);
   }

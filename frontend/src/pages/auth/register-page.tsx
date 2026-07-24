@@ -47,7 +47,7 @@ export function RegisterPage() {
       const { confirmPassword: _confirmPassword, ...payload } = values;
       await registerUser(payload);
       toast.success("Conta criada com sucesso");
-      navigate("/dashboard", { replace: true });
+      navigate("/verify-email", { replace: true });
     } catch (error) {
       const message = extractApiErrorMessage(error, "Não foi possível criar sua conta");
       toast.error(message);

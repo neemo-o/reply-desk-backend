@@ -31,6 +31,14 @@ export default () => ({
     checkoutSuccessUrl: process.env.STRIPE_CHECKOUT_SUCCESS_URL,
     checkoutCancelUrl: process.env.STRIPE_CHECKOUT_CANCEL_URL,
   },
+  mail: {
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT ?? '587', 10),
+    secure: process.env.SMTP_SECURE === 'true', // true = TLS implícito (porta 465)
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+    from: process.env.MAIL_FROM ?? 'ReplyDesk <no-reply@replydesk.com>',
+  },
   rateLimit: {
     ttl: parseInt(process.env.RATE_LIMIT_TTL ?? '60', 10),
     max: parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10),

@@ -67,6 +67,31 @@ class EnvironmentVariables {
   @IsString()
   @Matches(/^https:\/\//, { message: 'STRIPE_CHECKOUT_CANCEL_URL deve ser HTTPS' })
   STRIPE_CHECKOUT_CANCEL_URL?: string;
+
+  // 🔒 SMTP — envio do OTP de verificação de e-mail
+  @IsOptional()
+  @IsString()
+  SMTP_HOST?: string;
+
+  @IsOptional()
+  @IsString()
+  SMTP_PORT?: string;
+
+  @IsOptional()
+  @IsString()
+  SMTP_SECURE?: string;
+
+  @IsOptional()
+  @IsString()
+  SMTP_USER?: string;
+
+  @IsOptional()
+  @IsString()
+  SMTP_PASS?: string;
+
+  @IsOptional()
+  @IsString()
+  MAIL_FROM?: string;
 }
 
 export function validate(config: Record<string, unknown>) {
@@ -97,6 +122,9 @@ export function validate(config: Record<string, unknown>) {
     }
     if (!validatedConfig.STRIPE_CHECKOUT_SUCCESS_URL || !validatedConfig.STRIPE_CHECKOUT_CANCEL_URL) {
       throw new Error('STRIPE_CHECKOUT_SUCCESS_URL e STRIPE_CHECKOUT_CANCEL_URL são obrigatórios em produção.');
+    }
+    if (!validatedConfig.SMTP_HOST || !validatedConfig.SMTP_USER || !validatedConfig.SMTP_PASS) {
+      throw new Error('SMTP_HOST, SMTP_USER e SMTP_PASS são obrigatórios em produção (envio de OTP).');
     }
   }
 

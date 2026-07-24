@@ -21,6 +21,17 @@ export const authService = {
     return data;
   },
 
+  async verifyEmail(code: string): Promise<void> {
+    await apiClient.post("/auth/verify-email", { code });
+  },
+
+  async resendVerification(): Promise<{ retryAfterSeconds: number }> {
+    const { data } = await apiClient.post<{ retryAfterSeconds: number }>(
+      "/auth/resend-verification",
+    );
+    return data;
+  },
+
   /**
    * Redireciona para o fluxo OAuth Google no backend.
    * ⚠️ Depende de um endpoint `GET /auth/google` (Passport GoogleStrategy)

@@ -81,9 +81,12 @@ export class SubscriptionsService {
 
     const owner = await this.prisma.tenantUser.findFirst({
       where: { tenantId, role: { name: 'owner' } },
-      include: { user: { select: { email: true } } },
+      include: { user: { select: { email: true, emailVerified: true } } },
     });
     if (!owner) throw new NotFoundException('Owner do tenant não encontrado');
+    if (!owner.user.emailVerified) {
+      throw new ForbiddenException('Confirme seu e-mail antes de contratar um plano');
+    }
 
     const successUrl = this.config.get<string>('stripe.checkoutSuccessUrl');
     const cancelUrl = this.config.get<string>('stripe.checkoutCancelUrl');

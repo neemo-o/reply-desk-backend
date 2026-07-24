@@ -7,6 +7,7 @@ import configuration from './config/configuration';
 import { validate } from './config/env.validation';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { RedisModule } from './common/redis/redis.module';
+import { MailModule } from './common/mail/mail.module';
 import { LoggerModule } from './common/logger/logger.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
@@ -48,6 +49,7 @@ import { HealthModule } from './modules/health/health.module';
     LoggerModule,
     PrismaModule,
     RedisModule,
+    MailModule,
     QueueModule,
     AuthModule,
     UsersModule,

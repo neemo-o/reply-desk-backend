@@ -4,6 +4,7 @@ import { PublicOnlyRoute } from "@/routes/public-only-route";
 import { LandingPage } from "@/pages/landing/landing-page";
 import { LoginPage } from "@/pages/auth/login-page";
 import { RegisterPage } from "@/pages/auth/register-page";
+import { VerifyEmailPage } from "@/pages/auth/verify-email-page";
 import { DashboardPage } from "@/pages/dashboard/dashboard-page";
 import { NotFoundPage } from "@/pages/not-found-page";
 
@@ -18,6 +19,7 @@ export default function App() {
       </Route>
 
       <Route element={<ProtectedRoute />}>
+        <Route path="/verify-email" element={<VerifyEmailPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
       </Route>
 
